@@ -76,7 +76,7 @@ Governs AI-driven test maintenance and self-healing with strict safety constrain
 
 ### 5. GitHub Actions CI/CD Pipeline (`.github/workflows/playwright-ci.yml`)
 Fully automated CI pipeline designed for zero-flakiness execution:
-- **Triggers**: Automated runs on push and pull requests to `main` and `feature/product-crud`, plus manual execution via `workflow_dispatch`.
+- **Triggers**: Automated runs on pull requests targeting `main` and `feature/product-crud`, plus manual execution via `workflow_dispatch`.
 - **MongoDB Service**: Boots a containerized MongoDB 6 instance with Docker health checks.
 - **Service Readiness Poller (`scripts/wait-for.js`)**: Universal cross-platform poller utilizing native Node.js `fetch` to ensure both Backend and Frontend are listening before test execution.
 - **Automated Catalog Seeding (`scripts/seed-products.js`)**: Idempotently seeds expected catalog products into fresh databases.
@@ -210,7 +210,7 @@ npx playwright show-report
 
 ## CI/CD Workflow Overview
 
-The GitHub Actions workflow (`.github/workflows/playwright-ci.yml`) automatically performs the following steps on every push and pull request:
+The GitHub Actions workflow (`.github/workflows/playwright-ci.yml`) automatically runs when a pull request is created or updated:
 1. Spawns a **MongoDB 6.0** Docker service container.
 2. Installs root, backend, and frontend dependencies reproducibly using `npm ci`.
 3. Installs Chromium and system libraries.

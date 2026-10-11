@@ -1,15 +1,21 @@
 name: Playwright Tests
 
 on:
-  push:
-    branches:
-      - main
-      - feature/product-crud
   pull_request:
     branches:
       - main
-      - feature/product-crud
+
   workflow_dispatch:
+    inputs:
+      project:
+        description: 'Select test project to execute'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - api
+          - ui
 
 permissions:
   contents: read
@@ -39,7 +45,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
 
       - name: Install root dependencies
         run: npm ci
@@ -54,8 +60,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Start Backend Server
-        run: |
-          npm start --prefix backend &
+        run: npm start --prefix backend &
         env:
           PORT: 4000
           MONGODB_URI: mongodb://localhost:27017/ecommerce_sdet
@@ -69,16 +74,37 @@ jobs:
           API_BASE_URL: http://localhost:4000
 
       - name: Start Frontend Development Server
-        run: |
-          npm run dev --prefix frontend -- --host 0.0.0.0 --port 5173 &
+        run: npm run dev --prefix frontend -- --host 0.0.0.0 --port 5173 &
 
       - name: Wait for Frontend Server
         run: node scripts/wait-for.js http://localhost:5173 30
 
-      - name: Execute Playwright Test Suite (API & UI)
-        run: npm run test:heal -- --project=api --project=ui
+      - name: Execute Playwright Test Suite
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SELECTED_PROJECT: ${{ inputs.project || 'all' }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            case "$SELECTED_PROJECT" in
+              api)
+                npm run test:heal -- --project=api
+                ;;
+              ui)
+                npm run test:heal -- --project=ui
+                ;;
+              all)
+                npm run test:heal -- --project=api --project=ui
+                ;;
+              *)
+                echo "Unsupported project selection: $SELECTED_PROJECT"
+                exit 1
+                ;;
+            esac
+          else
+            npm run test:heal -- --project=api --project=ui
+          fi
 
-      - name: Upload Test Artifacts (Reports, Traces, Screenshots, Context)
+      - name: Upload Test Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
