@@ -1,0 +1,25 @@
+.product-list-page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 24px;
+}
+
+.product-list-header {
+    margin-bottom: 30px;
+}
+
+.product-list-header h1 {
+    margin: 0;
+    font-size: 32px;
+}
+
+.product-list-header p {
+    margin-top: 8px;
+    color: #666;
+}
+
+.product-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 24px;
+}

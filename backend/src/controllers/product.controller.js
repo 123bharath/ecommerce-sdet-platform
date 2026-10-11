@@ -5,7 +5,7 @@ const createProduct = async (req, res) => {
         const product = await Product.create(req.body);
         res.status(201).json(product);
     } catch (error) {
-        res.status(403).json({
+        res.status(400).json({
             message: "Request body is not valid",
             error: error.message
         });
