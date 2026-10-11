@@ -1,0 +1,89 @@
+name: Playwright Tests
+
+on:
+  push:
+    branches:
+      - main
+      - feature/product-crud
+  pull_request:
+    branches:
+      - main
+      - feature/product-crud
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: API & UI Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })' || mongo --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Install Playwright browsers and system dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Start Backend Server
+        run: |
+          npm start --prefix backend &
+        env:
+          PORT: 4000
+          MONGODB_URI: mongodb://localhost:27017/ecommerce_sdet
+
+      - name: Wait for Backend API
+        run: node scripts/wait-for.js http://localhost:4000/api/products 30
+
+      - name: Seed Test Product Catalog
+        run: node scripts/seed-products.js
+        env:
+          API_BASE_URL: http://localhost:4000
+
+      - name: Start Frontend Development Server
+        run: |
+          npm run dev --prefix frontend -- --host 0.0.0.0 --port 5173 &
+
+      - name: Wait for Frontend Server
+        run: node scripts/wait-for.js http://localhost:5173 30
+
+      - name: Execute Playwright Test Suite (API & UI)
+        run: npm run test:heal -- --project=api --project=ui
+
+      - name: Upload Test Artifacts (Reports, Traces, Screenshots, Context)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-artifacts
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

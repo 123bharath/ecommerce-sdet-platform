@@ -7,7 +7,8 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:heal": "node scripts/heal-runner.js"
   },
   "repository": {
     "type": "git",
@@ -22,6 +23,6 @@
   },
   "homepage": "https://github.com/123bharath/ecommerce-sdet-platform#readme",
   "devDependencies": {
-    "@playwright/test": "^1.63.0"
+    "@playwright/test": "^1.64.0"
   }
 }
