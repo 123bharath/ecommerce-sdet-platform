@@ -8,14 +8,8 @@ test.describe("Diagnostic CI Failure Trial", () => {
         // 1. Navigate to product catalog
         await productsPage.goto();
 
-        // 2. Verify page loaded cleanly by checking genuine heading is visible
-        const actualHeading = page.getByRole("heading", { level: 1, name: "Products" });
-        await expect(actualHeading).toBeVisible({ timeout: 5000 });
-
-        // 3. Deliberately stale locator lookup to trigger controlled timeout failure:
-        // The live DOM physically displays "Products", but this assertion targets an evolved/stale locator.
-        // This exercises headless failure evidence capture (live DOM and accessibility snapshot).
-        const staleHeading = page.getByRole("heading", { level: 1, name: "Products - Stale Title Indicator" });
-        await expect(staleHeading).toBeVisible({ timeout: 4000 });
+        // 2. Assert Page Object locator property
+        // When the POM property has a stale locator, this assertion fails cleanly on timeout.
+        await expect(productsPage.heading).toBeVisible({ timeout: 4000 });
     });
 });
