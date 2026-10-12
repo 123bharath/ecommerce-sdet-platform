@@ -368,25 +368,45 @@ jobs:
         with:
           name: validated-ai-repair
           path: validated-patch
-      - name: Re-Verify PR Head SHA (Reject Stale Candidates)
+      - name: Re-Verify PR Lineage & Head SHA (Reject Stale Candidates)
         id: reverify-head
         env:
           PR_NUMBER: ${{ needs.generate-repair.outputs.pr_number }}
           SOURCE_COMMIT: ${{ needs.generate-repair.outputs.source_commit }}
+          EXPECTED_HEAD_BRANCH: ${{ needs.generate-repair.outputs.head_branch }}
+          EXPECTED_BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
-            echo "Re-verifying PR #$PR_NUMBER head SHA before publishing..."
+            echo "Re-verifying PR #$PR_NUMBER lineage and head SHA before publishing..."
+            if [ -z "$EXPECTED_HEAD_BRANCH" ]; then
+              echo "::error::PR #$PR_NUMBER expected head branch is missing. Aborting publish."
+              exit 1
+            fi
+            if [ -z "$EXPECTED_BASE_BRANCH" ]; then
+              echo "::error::PR #$PR_NUMBER expected base branch is missing. Aborting publish."
+              exit 1
+            fi
             CURRENT_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
+            CURRENT_HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName -q .headRefName)
+            CURRENT_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q .baseRefName)
             CURRENT_STATE=$(gh pr view "$PR_NUMBER" --json state -q .state)
             if [ "$CURRENT_STATE" != "OPEN" ]; then
               echo "::error::PR #$PR_NUMBER is not OPEN (state: $CURRENT_STATE). Aborting publish."
               exit 1
             fi
             if [ "$CURRENT_HEAD" != "$SOURCE_COMMIT" ]; then
-              echo "::error::PR #$PR_NUMBER head has mutated from $SOURCE_COMMIT to $CURRENT_HEAD while validation was running. Aborting publish."
+              echo "::error::PR #$PR_NUMBER head SHA has mutated from $SOURCE_COMMIT to $CURRENT_HEAD while validation was running. Aborting publish."
               exit 1
             fi
-            echo "✓ PR #$PR_NUMBER head remains unchanged at $SOURCE_COMMIT."
+            if [ "$CURRENT_HEAD_BRANCH" != "$EXPECTED_HEAD_BRANCH" ]; then
+              echo "::error::PR #$PR_NUMBER head branch has changed from '$EXPECTED_HEAD_BRANCH' to '$CURRENT_HEAD_BRANCH'. Aborting publish."
+              exit 1
+            fi
+            if [ "$CURRENT_BASE_BRANCH" != "$EXPECTED_BASE_BRANCH" ]; then
+              echo "::error::PR #$PR_NUMBER base branch has changed from '$EXPECTED_BASE_BRANCH' to '$CURRENT_BASE_BRANCH'. Aborting publish."
+              exit 1
+            fi
+            echo "✓ PR #$PR_NUMBER lineage verified: head=$CURRENT_HEAD ($CURRENT_HEAD_BRANCH -> $CURRENT_BASE_BRANCH), state=$CURRENT_STATE."
           fi
       - name: Create Isolated Repair Branch & Draft PR
         id: create-pr

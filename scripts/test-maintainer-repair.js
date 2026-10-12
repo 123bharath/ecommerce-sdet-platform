@@ -1,6 +1,7 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const YAML = require("yaml");
 const {
     isValidGitRef,
     validateTargetPomPath,
@@ -2046,6 +2047,241 @@ async function runAll() {
             assert.strictEqual(verification.valid, true, `Verification must pass: ${verification.error} - ${verification.message}`);
             assert.strictEqual(verification.targetFile, targetPomRel);
             assert.strictEqual(verification.testFile, specFileRel);
+        });
+
+        // =========================================================================
+        // SUITE 8: Workflow Defense-in-Depth & PR Lineage Re-Verification Contract
+        // =========================================================================
+        console.log("\n[Suite 8] Workflow Defense-in-Depth & PR Lineage Re-Verification Contract");
+
+        const workflowPath = path.resolve(ROOT_DIR, ".github/workflows/maintainer-ai-repair.yml");
+        let workflowDoc;
+
+        await runTest("Workflow YAML parses cleanly and declares required jobs", () => {
+            assert.ok(fs.existsSync(workflowPath), "maintainer-ai-repair.yml must physically exist");
+            const rawYaml = fs.readFileSync(workflowPath, "utf8");
+            workflowDoc = YAML.parse(rawYaml);
+            assert.ok(workflowDoc, "Parsed workflow document must not be empty");
+            assert.ok(workflowDoc.jobs, "Workflow must define jobs");
+            assert.ok(workflowDoc.jobs["generate-repair"], "generate-repair job must exist");
+            assert.ok(workflowDoc.jobs["validate-repair"], "validate-repair job must exist");
+            assert.ok(workflowDoc.jobs["publish-repair"], "publish-repair job must exist");
+        });
+
+        await runTest("publish-repair job includes reverify-head step with all 4 lineage environment variables", () => {
+            const publishJob = workflowDoc.jobs["publish-repair"];
+            assert.ok(publishJob.steps, "publish-repair must define steps");
+            const reverifyStep = publishJob.steps.find(s => s.id === "reverify-head");
+            assert.ok(reverifyStep, "reverify-head step must exist in publish-repair");
+            assert.ok(reverifyStep.env, "reverify-head step must define environment variables");
+            assert.strictEqual(reverifyStep.env.PR_NUMBER, "${{ needs.generate-repair.outputs.pr_number }}");
+            assert.strictEqual(reverifyStep.env.SOURCE_COMMIT, "${{ needs.generate-repair.outputs.source_commit }}");
+            assert.strictEqual(reverifyStep.env.EXPECTED_HEAD_BRANCH, "${{ needs.generate-repair.outputs.head_branch }}");
+            assert.strictEqual(reverifyStep.env.EXPECTED_BASE_BRANCH, "${{ inputs.base_branch }}");
+        });
+
+        await runTest("reverify-head step script queries headRefOid, headRefName, baseRefName, and state via gh pr view", () => {
+            const reverifyStep = workflowDoc.jobs["publish-repair"].steps.find(s => s.id === "reverify-head");
+            const runScript = reverifyStep.run || "";
+            assert.ok(runScript.includes('CURRENT_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)'), "Must query headRefOid");
+            assert.ok(runScript.includes('CURRENT_HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName -q .headRefName)'), "Must query headRefName");
+            assert.ok(runScript.includes('CURRENT_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q .baseRefName)'), "Must query baseRefName");
+            assert.ok(runScript.includes('CURRENT_STATE=$(gh pr view "$PR_NUMBER" --json state -q .state)'), "Must query state");
+        });
+
+        await runTest("reverify-head step script independently checks state, head SHA, head branch, and base branch", () => {
+            const reverifyStep = workflowDoc.jobs["publish-repair"].steps.find(s => s.id === "reverify-head");
+            const runScript = reverifyStep.run || "";
+            assert.ok(runScript.includes('[ -z "$EXPECTED_HEAD_BRANCH" ]'), "Must reject empty EXPECTED_HEAD_BRANCH");
+            assert.ok(runScript.includes('[ -z "$EXPECTED_BASE_BRANCH" ]'), "Must reject empty EXPECTED_BASE_BRANCH");
+            assert.ok(runScript.includes('[ "$CURRENT_STATE" != "OPEN" ]'), "Must reject non-OPEN state");
+            assert.ok(runScript.includes('[ "$CURRENT_HEAD" != "$SOURCE_COMMIT" ]'), "Must reject mutated head SHA");
+            assert.ok(runScript.includes('[ "$CURRENT_HEAD_BRANCH" != "$EXPECTED_HEAD_BRANCH" ]'), "Must reject mutated head branch");
+            assert.ok(runScript.includes('[ "$CURRENT_BASE_BRANCH" != "$EXPECTED_BASE_BRANCH" ]'), "Must reject mutated base branch");
+            assert.ok(!runScript.includes('[ -n "$EXPECTED_HEAD_BRANCH" ] &&'), "Must not use conditional skip for head branch");
+            assert.ok(!runScript.includes('[ -n "$EXPECTED_BASE_BRANCH" ] &&'), "Must not use conditional skip for base branch");
+        });
+
+        await runTest("Draft PR target derivation maintains strict separation between original base branch and repair PR target branch", () => {
+            const createPrStep = workflowDoc.jobs["publish-repair"].steps.find(s => s.id === "create-pr");
+            assert.ok(createPrStep, "create-pr step must exist");
+            const runScript = createPrStep.run || "";
+            assert.ok(runScript.includes('TARGET_BASE="${HEAD_BRANCH:-$BASE_BRANCH}"'), "Must fallback to HEAD_BRANCH if defined");
+            assert.ok(runScript.includes('--base-branch "$TARGET_BASE"'), "Must pass TARGET_BASE to create-repair-pr.js");
+
+            // Diagnostic PR #2 evaluation:
+            const pr2HeadBranch = "test/diagnostic-ci-failure-trial";
+            const pr2OriginalBaseBranch = "main";
+            const targetBase = pr2HeadBranch || pr2OriginalBaseBranch;
+            assert.strictEqual(targetBase, "test/diagnostic-ci-failure-trial");
+            assert.notStrictEqual(targetBase, pr2OriginalBaseBranch, "Repair PR target branch must NOT be the original PR base branch");
+        });
+
+        function simulateReverifyHead({ prNumber, sourceCommit, expectedHeadBranch, expectedBaseBranch, livePr }) {
+            if (!prNumber) return { passed: true, reason: "NO_PR" };
+            if (!expectedHeadBranch || typeof expectedHeadBranch !== "string" || expectedHeadBranch.trim() === "") {
+                return { passed: false, error: `PR #${prNumber} expected head branch is missing. Aborting publish.` };
+            }
+            if (!expectedBaseBranch || typeof expectedBaseBranch !== "string" || expectedBaseBranch.trim() === "") {
+                return { passed: false, error: `PR #${prNumber} expected base branch is missing. Aborting publish.` };
+            }
+            if (livePr.state !== "OPEN") {
+                return { passed: false, error: `PR #${prNumber} is not OPEN (state: ${livePr.state}). Aborting publish.` };
+            }
+            if (livePr.headRefOid !== sourceCommit) {
+                return { passed: false, error: `PR #${prNumber} head SHA has mutated from ${sourceCommit} to ${livePr.headRefOid}. Aborting publish.` };
+            }
+            if (livePr.headRefName !== expectedHeadBranch) {
+                return { passed: false, error: `PR #${prNumber} head branch has changed from '${expectedHeadBranch}' to '${livePr.headRefName}'. Aborting publish.` };
+            }
+            if (livePr.baseRefName !== expectedBaseBranch) {
+                return { passed: false, error: `PR #${prNumber} base branch has changed from '${expectedBaseBranch}' to '${livePr.baseRefName}'. Aborting publish.` };
+            }
+            return { passed: true, details: `head=${livePr.headRefOid} (${livePr.headRefName} -> ${livePr.baseRefName})` };
+        }
+
+        const pr2Expected = {
+            prNumber: "2",
+            sourceCommit: "8c520a411a03e5f09d79bfae305c302b2f614b77",
+            expectedHeadBranch: "test/diagnostic-ci-failure-trial",
+            expectedBaseBranch: "main"
+        };
+
+        await runTest("Simulated reverify-head: approves matching PR #2 diagnostic metadata", () => {
+            const res = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: "8c520a411a03e5f09d79bfae305c302b2f614b77",
+                    headRefName: "test/diagnostic-ci-failure-trial",
+                    baseRefName: "main"
+                }
+            });
+            assert.strictEqual(res.passed, true);
+        });
+
+        await runTest("Simulated reverify-head: rejects missing or empty expectedHeadBranch", () => {
+            const missingHeadRes = simulateReverifyHead({
+                ...pr2Expected,
+                expectedHeadBranch: "",
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: "test/diagnostic-ci-failure-trial",
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(missingHeadRes.passed, false);
+            assert.ok(missingHeadRes.error.includes("expected head branch is missing"));
+
+            const nullHeadRes = simulateReverifyHead({
+                ...pr2Expected,
+                expectedHeadBranch: null,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: "test/diagnostic-ci-failure-trial",
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(nullHeadRes.passed, false);
+            assert.ok(nullHeadRes.error.includes("expected head branch is missing"));
+        });
+
+        await runTest("Simulated reverify-head: rejects missing or empty expectedBaseBranch", () => {
+            const missingBaseRes = simulateReverifyHead({
+                ...pr2Expected,
+                expectedBaseBranch: "",
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: "main"
+                }
+            });
+            assert.strictEqual(missingBaseRes.passed, false);
+            assert.ok(missingBaseRes.error.includes("expected base branch is missing"));
+
+            const nullBaseRes = simulateReverifyHead({
+                ...pr2Expected,
+                expectedBaseBranch: null,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: "main"
+                }
+            });
+            assert.strictEqual(nullBaseRes.passed, false);
+            assert.ok(nullBaseRes.error.includes("expected base branch is missing"));
+        });
+
+        await runTest("Simulated reverify-head: rejects non-OPEN PR state (CLOSED, MERGED)", () => {
+            const closedRes = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "CLOSED",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(closedRes.passed, false);
+            assert.ok(closedRes.error.includes("is not OPEN"));
+
+            const mergedRes = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "MERGED",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(mergedRes.passed, false);
+            assert.ok(mergedRes.error.includes("is not OPEN"));
+        });
+
+        await runTest("Simulated reverify-head: rejects mutated head SHA", () => {
+            const res = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: "9999999999999999999999999999999999999999",
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(res.passed, false);
+            assert.ok(res.error.includes("head SHA has mutated"));
+        });
+
+        await runTest("Simulated reverify-head: rejects mutated head branch", () => {
+            const res = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: "feature/tampered-head-branch",
+                    baseRefName: pr2Expected.expectedBaseBranch
+                }
+            });
+            assert.strictEqual(res.passed, false);
+            assert.ok(res.error.includes("head branch has changed"));
+        });
+
+        await runTest("Simulated reverify-head: rejects mutated base branch", () => {
+            const res = simulateReverifyHead({
+                ...pr2Expected,
+                livePr: {
+                    state: "OPEN",
+                    headRefOid: pr2Expected.sourceCommit,
+                    headRefName: pr2Expected.expectedHeadBranch,
+                    baseRefName: "develop"
+                }
+            });
+            assert.strictEqual(res.passed, false);
+            assert.ok(res.error.includes("base branch has changed"));
         });
 
         console.log(`\n============================================================`);
