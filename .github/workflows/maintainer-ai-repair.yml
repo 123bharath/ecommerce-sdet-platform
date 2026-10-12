@@ -176,28 +176,39 @@ jobs:
         id: apply-patch
         env:
           CANDIDATE_DIR: candidate-patch
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const dir = path.resolve(process.env.CANDIDATE_DIR);
-            const patch = path.join(dir, "repair.patch");
-            if (!fs.existsSync(patch)) {
-              throw new Error("Candidate patch missing: " + patch);
-            }
-            const stat = fs.statSync(patch);
-            if (!stat.isFile() || stat.size === 0) {
-              throw new Error("Candidate patch is not a non-empty file.");
-            }
-            console.log("Candidate patch verified (" + stat.size + " bytes).");
-          '
-          echo "Setting up isolated worktree for patch validation..."
-          git worktree add ../validation-workspace HEAD
-          cd ../validation-workspace
+          set -euo pipefail
+
           PATCH_FILE="${GITHUB_WORKSPACE}/candidate-patch/repair.patch"
-          git apply --check "$PATCH_FILE"
+          WORKTREE="../validation-workspace"
+
+          test -s "$PATCH_FILE" || {
+            echo "::error::Candidate patch is missing or empty."
+            exit 1
+          }
+
+          echo "=== Candidate patch ==="
+          cat "$PATCH_FILE"
+
+          echo "=== Create isolated worktree at exact source commit ==="
+          git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+
+          cd "$WORKTREE"
+
+          echo "=== Actual ProductListPage.js at source commit ==="
+          git show HEAD:tests/pages/ProductListPage.js | sed -n '1,35p'
+
+          echo "=== Verify patch target and context ==="
+          git apply --check --verbose "$PATCH_FILE"
+
+          echo "=== Apply patch ==="
           git apply "$PATCH_FILE"
-          echo "Patch applied cleanly in isolated worktree."
+
+          echo "=== Verify resulting diff ==="
+          git diff --check
+          git diff -- tests/pages/ProductListPage.js
+          echo "Patch applied successfully."
       - name: Install dependencies in isolated workspace
         run: |
           cd ../validation-workspace
