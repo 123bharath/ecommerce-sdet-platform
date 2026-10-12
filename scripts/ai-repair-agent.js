@@ -871,6 +871,17 @@ function validateUnifiedDiff(diffString, rootDir = ROOT_DIR, options = {}) {
         originalContent = fs.readFileSync(resolvedPath, "utf8");
     }
 
+    // Verify all removed lines exist in originalContent
+    const origTrimmedLines = originalContent.split(/\r?\n/).map((l) => l.trim());
+    for (const hunk of parsed.hunks) {
+        for (const removedLine of hunk.removedLines) {
+            const trimmedRemoved = removedLine.trim();
+            if (trimmedRemoved && !origTrimmedLines.includes(trimmedRemoved)) {
+                throw new Error(`Security Violation: Removed line '${trimmedRemoved.slice(0, 50)}' does not exist in target file at source commit.`);
+            }
+        }
+    }
+
     const patchedContent = applyUnifiedDiff(originalContent, diffString);
 
     // 4. Validate overall patch integrity, JavaScript syntax, and class structure
@@ -901,8 +912,10 @@ function validatePatchAst(diffString, expectedTargetFile, sourceCommit = null, r
 
 /**
  * Generates a standard unified diff string between original and patched contents.
+ * Includes context lines (default 3) to allow standard patch tools (e.g. git apply)
+ * to cleanly anchor hunks.
  */
-function generateUnifiedDiff(relPath, originalContent, patchedContent) {
+function generateUnifiedDiff(relPath, originalContent, patchedContent, options = {}) {
     let origNorm = (originalContent || "").replace(/\r\n/g, "\n");
     let patchedNorm = (patchedContent || "").replace(/\r\n/g, "\n");
     if (origNorm.endsWith("\n") && !patchedNorm.endsWith("\n")) {
@@ -911,8 +924,13 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent) {
         origNorm += "\n";
     }
 
-    const origLines = origNorm.split("\n");
-    const patchedLines = patchedNorm.split("\n");
+    const hasTrailingNewline = origNorm.endsWith("\n");
+    const origRaw = hasTrailingNewline ? origNorm.slice(0, -1) : origNorm;
+    const origLines = origRaw.length > 0 ? origRaw.split("\n") : [];
+
+    const patchedHasTrailingNewline = patchedNorm.endsWith("\n");
+    const patchedRaw = patchedHasTrailingNewline ? patchedNorm.slice(0, -1) : patchedNorm;
+    const patchedLines = patchedRaw.length > 0 ? patchedRaw.split("\n") : [];
 
     let start = 0;
     while (start < origLines.length && start < patchedLines.length && origLines[start] === patchedLines[start]) {
@@ -926,23 +944,42 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent) {
         patchedEnd--;
     }
 
+    if (start > origEnd && start > patchedEnd) {
+        return "";
+    }
+
     const removedLines = origLines.slice(start, origEnd + 1);
     const addedLines = patchedLines.slice(start, patchedEnd + 1);
 
-    const origCount = removedLines.length;
-    const patchedCount = addedLines.length;
-    const startLineNum = start + 1;
+    const contextCount = (typeof options === "number" ? options : options?.context) ?? 3;
+
+    const leadingContextStart = Math.max(0, start - contextCount);
+    const leadingContext = origLines.slice(leadingContextStart, start);
+
+    const trailingContextEnd = Math.min(origLines.length, origEnd + 1 + contextCount);
+    const trailingContext = origLines.slice(origEnd + 1, trailingContextEnd);
+
+    const oldHunkStart = leadingContextStart + 1;
+    const oldHunkCount = leadingContext.length + removedLines.length + trailingContext.length;
+    const newHunkStart = leadingContextStart + 1;
+    const newHunkCount = leadingContext.length + addedLines.length + trailingContext.length;
 
     const diffHeader = [
         `--- a/${relPath}`,
         `+++ b/${relPath}`,
-        `@@ -${startLineNum},${origCount} +${startLineNum},${patchedCount} @@`
+        `@@ -${oldHunkStart},${oldHunkCount} +${newHunkStart},${newHunkCount} @@`
     ];
 
     const diffBody = [
+        ...leadingContext.map((line) => ` ${line}`),
         ...removedLines.map((line) => `-${line}`),
-        ...addedLines.map((line) => `+${line}`)
+        ...addedLines.map((line) => `+${line}`),
+        ...trailingContext.map((line) => ` ${line}`)
     ];
+
+    if (!hasTrailingNewline && trailingContextEnd >= origLines.length) {
+        diffBody.push("\\ No newline at end of file");
+    }
 
     return [...diffHeader, ...diffBody, ""].join("\n");
 }
@@ -1498,12 +1535,22 @@ async function runRepairAgent(options = {}) {
     let resolvedTargetPomRel = options.targetPomRel || failure.targetFile || null;
     if (!resolvedTargetPomRel && failure.specFile) {
         const specAbs = path.isAbsolute(failure.specFile) ? failure.specFile : path.resolve(ROOT_DIR, failure.specFile);
+        let specCode = null;
         if (fs.existsSync(specAbs)) {
             try {
-                const specCode = fs.readFileSync(specAbs, "utf8");
-                const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
-                if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
+                specCode = fs.readFileSync(specAbs, "utf8");
             } catch { /* ignore */ }
+        } else if (options.sourceCommit) {
+            try {
+                specCode = execSync(`git show ${options.sourceCommit}:${failure.specFile}`, {
+                    cwd: ROOT_DIR,
+                    encoding: "utf8"
+                });
+            } catch { /* ignore */ }
+        }
+        if (specCode) {
+            const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
+            if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
         }
     }
     if (!resolvedTargetPomRel) {
@@ -1592,6 +1639,21 @@ async function runRepairAgent(options = {}) {
         return result;
     }
 
+    // Guard against fabricating repairs: If target file already contains the healed locator, abstain
+    if (modelResponse.healedLocator && originalPomContent.includes(modelResponse.healedLocator)) {
+        console.log(`[AI Repair Agent] Target file already contains proposed locator: '${modelResponse.healedLocator}'. Abstaining.`);
+        const result = {
+            status: "ABSTAINED",
+            reason: "ALREADY_HEALED",
+            model: actualModelUsed,
+            rootCause: modelResponse.rootCause,
+            diagnosis: "The proposed healed locator is already present in the target Page Object at the source commit.",
+            targetFile: modelResponse.targetFile || resolvedTargetPomRel
+        };
+        recordSummary(result);
+        return result;
+    }
+
     // 8. Security verification on proposed patch code
     try {
         if (modelResponse.targetFile) {
@@ -1607,9 +1669,10 @@ async function runRepairAgent(options = {}) {
         }
         if (!modelResponse.patchedFileContent && modelResponse.healedLocator) {
             const staleTarget = modelResponse.originalLocator || failure.targetLocator;
-            if (staleTarget && originalPomContent.includes(staleTarget)) {
-                modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
+            if (!staleTarget || !originalPomContent.includes(staleTarget)) {
+                throw new Error(`Security Violation: Stale locator '${staleTarget || "undefined"}' does not exist in target file at source commit.`);
             }
+            modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
         }
         validateTargetFile(modelResponse.targetFile, ROOT_DIR);
         validatePatchIntegrity(originalPomContent, modelResponse.patchedFileContent);

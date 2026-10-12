@@ -358,11 +358,16 @@ async function runAll() {
             const updated = "header\nnewLocator\nfooter"; // Missing trailing newline
             const diff = generateUnifiedDiff("tests/pages/TestPage.js", orig, updated);
 
-            assert.ok(diff.includes("@@ -2,1 +2,1 @@"));
+            assert.ok(diff.includes("@@ -1,3 +1,3 @@"));
+            assert.ok(diff.includes(" header"));
             assert.ok(diff.includes("-oldLocator"));
             assert.ok(diff.includes("+newLocator"));
+            assert.ok(diff.includes(" footer"));
             assert.ok(!diff.includes("-footer"));
             assert.ok(!diff.includes("+footer"));
+
+            const zeroDiff = generateUnifiedDiff("tests/pages/TestPage.js", orig, updated, { context: 0 });
+            assert.ok(zeroDiff.includes("@@ -2,1 +2,1 @@"));
         });
 
         runTest("generateUnifiedDiff normalizes CRLF line endings to LF", () => {
@@ -806,7 +811,7 @@ async function runAll() {
                 "-this content does not exist anywhere in the file",
                 "+this.heading = page.getByTestId(\"page-title\");"
             ].join("\n");
-            assert.throws(() => validateUnifiedDiff(nonMatchingDiff, ROOT_DIR), /Patch application failed/);
+            assert.throws(() => validateUnifiedDiff(nonMatchingDiff, ROOT_DIR), /Patch application failed|does not exist in target file/);
         });
 
         runTest("Rejects diff adding process execution (child_process.execSync)", () => {

@@ -11,10 +11,13 @@ const {
     extractRepoFromRunUrl,
     extractRepoFromPrUrl
 } = require("./verify-ci-metadata");
+const { execSync } = require("child_process");
 const {
     resolveCandidatePatch,
     validatePatchAst,
     validateUnifiedDiff,
+    parseUnifiedDiff,
+    applyUnifiedDiff,
     checkSyntaxIntegrity,
     checkPermittedLocatorChanges,
     validateAstIntegrity,
@@ -1296,9 +1299,15 @@ async function runAll() {
             const orig = "line1\nline2\nline3\n";
             const updated = "line1\nline2-healed\nline3"; // Missing trailing newline
             const diff = generateUnifiedDiff("tests/pages/ProductListPage.js", orig, updated);
-            assert.ok(diff.includes("@@ -2,1 +2,1 @@"));
+            assert.ok(diff.includes("@@ -1,3 +1,3 @@"));
+            assert.ok(diff.includes(" line1"));
+            assert.ok(diff.includes("-line2"));
+            assert.ok(diff.includes("+line2-healed"));
+            assert.ok(diff.includes(" line3"));
             assert.ok(!diff.includes("-line3"));
             assert.ok(!diff.includes("+line3"));
+            const zeroDiff = generateUnifiedDiff("tests/pages/ProductListPage.js", orig, updated, { context: 0 });
+            assert.ok(zeroDiff.includes("@@ -2,1 +2,1 @@"));
         });
 
         await runTest("validatePatchAst enforces single-file target matching", () => {
@@ -1752,6 +1761,291 @@ async function runAll() {
             assert.throws(() => {
                 resolveCandidatePatch(path.resolve(TEST_SANDBOX, "non-existent-candidate-dir"));
             }, /Candidate directory does not exist/);
+        });
+
+        // =========================================================================
+        // SUITE 7: Context Diffing, Source Commit Lineage & Git Apply (8 Scenarios)
+        // =========================================================================
+        console.log("\n[Suite 7] Robust Context Diffing, Source Commit Lineage & Git Apply (8 Scenarios)");
+
+        await runTest("Scenario 1: One-line locator repair at nontrivial line number applies cleanly with context", () => {
+            const lines = [];
+            lines.push("class CartPage {");
+            lines.push("    constructor(page) {");
+            lines.push("        this.page = page;");
+            for (let i = 4; i <= 58; i++) {
+                lines.push(`        this.prop${i} = page.locator("#item-${i}");`);
+            }
+            lines.push('        this.checkoutButton = page.getByRole("button", { name: "Old Checkout" });');
+            for (let i = 60; i <= 68; i++) {
+                lines.push(`        this.prop${i} = page.locator("#item-${i}");`);
+            }
+            lines.push("    }");
+            lines.push("}");
+            lines.push("module.exports = CartPage;");
+            const origCode = lines.join("\n") + "\n";
+            const patchedCode = origCode.replace(
+                'this.checkoutButton = page.getByRole("button", { name: "Old Checkout" });',
+                'this.checkoutButton = page.getByRole("button", { name: "Proceed to Checkout" });'
+            );
+
+            const diff = generateUnifiedDiff("tests/pages/CartPage.js", origCode, patchedCode, { context: 3 });
+            assert.ok(diff.includes("@@ -56,7 +56,7 @@"), `Hunk header must anchor around line 59 with 3 lines of context. Got:\n${diff}`);
+            assert.ok(diff.includes(" this.prop58 = page.locator(\"#item-58\");"));
+            assert.ok(diff.includes("-        this.checkoutButton = page.getByRole(\"button\", { name: \"Old Checkout\" });"));
+            assert.ok(diff.includes("+        this.checkoutButton = page.getByRole(\"button\", { name: \"Proceed to Checkout\" });"));
+            assert.ok(diff.includes(" this.prop60 = page.locator(\"#item-60\");"));
+
+            const { hunks } = parseUnifiedDiff(diff);
+            assert.strictEqual(hunks.length, 1);
+            assert.strictEqual(hunks[0].oldStart, 56);
+            assert.strictEqual(hunks[0].oldCount, 7);
+            const applied = applyUnifiedDiff(origCode, diff);
+            assert.strictEqual(applied.trim(), patchedCode.trim());
+        });
+
+        await runTest("Scenario 2: Stale locator that does not exist in source is rejected", () => {
+            const fakeDiff = [
+                "--- a/tests/pages/ProductListPage.js",
+                "+++ b/tests/pages/ProductListPage.js",
+                "@@ -10,7 +10,7 @@",
+                "         this.page = page;",
+                "         this.productCards = page.locator(\".product-card\");",
+                "         this.productTitles = page.locator(\".product-title\");",
+                "-        this.heading = page.getByRole(\"heading\", { level: 1, name: \"Completely Fake Nonexistent Locator\" });",
+                "+        this.heading = page.getByRole(\"heading\", { level: 1, name: \"Products\" });",
+                "         this.sortDropdown = page.locator(\"#sort-select\");",
+                "         this.categoryFilter = page.locator(\"#category-filter\");",
+                "         this.priceRangeFilter = page.locator(\"#price-filter\");",
+                ""
+            ].join("\n");
+
+            assert.throws(() => {
+                validateUnifiedDiff(fakeDiff, ROOT_DIR);
+            }, /Security Violation: Removed line '.*' does not exist in target file at source commit\./);
+        });
+
+        await runTest("Scenario 3: Patch generated from exact source commit applies cleanly via git apply --check", () => {
+            const sourceCommit = "8c520a411a03e5f09d79bfae305c302b2f614b77";
+            const targetPomRel = "tests/pages/ProductListPage.js";
+
+            const origContent = execSync(`git show ${sourceCommit}:${targetPomRel}`, {
+                cwd: ROOT_DIR,
+                encoding: "utf8"
+            });
+            assert.ok(origContent.includes("Products - Stale Title Indicator"), "Source commit must contain stale locator");
+
+            const patchedContent = origContent.replace("Products - Stale Title Indicator", "Products");
+            const diff = generateUnifiedDiff(targetPomRel, origContent, patchedContent, { context: 3 });
+
+            const validation = validatePatchAst(diff, targetPomRel, sourceCommit, ROOT_DIR);
+            assert.strictEqual(validation.valid, true);
+
+            const patchFile = path.resolve(TEST_SANDBOX, "source-commit-repair.patch");
+            fs.writeFileSync(patchFile, diff, "utf8");
+
+            const worktreePath = path.resolve(TEST_SANDBOX, "wt-source-test");
+            try {
+                execSync(`git worktree add --detach "${worktreePath}" ${sourceCommit}`, {
+                    cwd: ROOT_DIR,
+                    stdio: "pipe"
+                });
+                execSync(`git apply --check "${patchFile}"`, {
+                    cwd: worktreePath,
+                    stdio: "pipe"
+                });
+                execSync(`git apply "${patchFile}"`, {
+                    cwd: worktreePath,
+                    stdio: "pipe"
+                });
+                const appliedContent = fs.readFileSync(path.resolve(worktreePath, targetPomRel), "utf8");
+                assert.ok(appliedContent.includes('name: "Products"'));
+                assert.ok(!appliedContent.includes("Stale Title Indicator"));
+            } finally {
+                try {
+                    execSync(`git worktree remove --force "${worktreePath}"`, {
+                        cwd: ROOT_DIR,
+                        stdio: "pipe"
+                    });
+                } catch {}
+            }
+        });
+
+        await runTest("Scenario 4: CRLF/LF and EOF-newline differences handled cleanly", () => {
+            // Case A: CRLF input vs LF patch
+            const origCrlf = "class TestPage {\r\n    constructor(page) {\r\n        this.page = page;\r\n        this.btn = page.locator('#old');\r\n    }\r\n}\r\nmodule.exports = TestPage;\r\n";
+            const patchedLf = "class TestPage {\n    constructor(page) {\n        this.page = page;\n        this.btn = page.locator('#new');\n    }\n}\nmodule.exports = TestPage;\n";
+            const diffCrlf = generateUnifiedDiff("tests/pages/TestPage.js", origCrlf, patchedLf, { context: 3 });
+            assert.ok(!diffCrlf.includes("\r"), "Diff must be LF normalized");
+            const appliedCrlf = applyUnifiedDiff(origCrlf, diffCrlf);
+            assert.strictEqual(appliedCrlf.replace(/\r\n/g, "\n").trim(), patchedLf.trim());
+
+            // Case B: No trailing newline at EOF
+            const origNoEof = "class TestPage {\n    constructor(page) {\n        this.btn = page.locator('#old');\n    }\n}\nmodule.exports = TestPage;";
+            const patchedNoEof = "class TestPage {\n    constructor(page) {\n        this.btn = page.locator('#new');\n    }\n}\nmodule.exports = TestPage;";
+            const diffNoEof = generateUnifiedDiff("tests/pages/TestPage.js", origNoEof, patchedNoEof, { context: 3 });
+            assert.ok(diffNoEof.includes("\\ No newline at end of file"), "Diff must indicate EOF without newline");
+            const appliedNoEof = applyUnifiedDiff(origNoEof, diffNoEof);
+            assert.strictEqual(appliedNoEof.trim(), patchedNoEof.trim());
+        });
+
+        await runTest("Scenario 5: Patch targeting wrong file or wrong source SHA is rejected", () => {
+            // Case A: Target file outside tests/pages/*.js
+            const specDiff = "--- a/tests/ui/diagnostic-trial.spec.js\n+++ b/tests/ui/diagnostic-trial.spec.js\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+            assert.throws(() => {
+                validateUnifiedDiff(specDiff, ROOT_DIR);
+            }, /Security Violation: Changes are strictly restricted to tests\/pages\/\*\.js/);
+
+            const reactDiff = "--- a/frontend/src/App.jsx\n+++ b/frontend/src/App.jsx\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+            assert.throws(() => {
+                validateUnifiedDiff(reactDiff, ROOT_DIR);
+            }, /Security Violation: Changes are strictly restricted to tests\/pages\/\*\.js/);
+
+            // Case B: Patch target mismatching expectedTargetFile
+            const currentPom = fs.readFileSync(path.resolve(ROOT_DIR, "tests/pages/ProductListPage.js"), "utf8");
+            const validDiff = generateUnifiedDiff("tests/pages/ProductListPage.js", currentPom, currentPom.replace('name: "Products"', 'name: "Catalog"'), { context: 3 });
+            assert.throws(() => {
+                validatePatchAst(validDiff, "tests/pages/CartPage.js", null, ROOT_DIR);
+            }, /Security Violation: Patch target file 'tests\/pages\/ProductListPage\.js' does not match expected target 'tests\/pages\/CartPage\.js'/);
+
+            // Case C: Non-existent sourceCommit SHA
+            assert.throws(() => {
+                validateUnifiedDiff(validDiff, ROOT_DIR, { sourceCommit: "0000000000000000000000000000000000000000" });
+            }, /does not exist at source commit/);
+        });
+
+        await runTest("Scenario 6: Non-locator executable changes and unsafe constructs remain rejected", () => {
+            const currentPom = fs.readFileSync(path.resolve(ROOT_DIR, "tests/pages/ProductListPage.js"), "utf8");
+
+            const loopAttack = currentPom.replace("constructor(page) {", "constructor(page) {\n        for (let i = 0; i < 10; i++) {}");
+            assert.throws(() => validateAstIntegrity(currentPom, loopAttack), /Forbidden AST node 'ForStatement'/);
+
+            const evalAttack = currentPom.replace("constructor(page) {", "constructor(page) {\n        eval('process.exit(1)');");
+            assert.throws(() => validateAstIntegrity(currentPom, evalAttack), /Forbidden function call 'eval\(\)'/);
+
+            const assertAttack = currentPom.replace("constructor(page) {", "constructor(page) {\n        expect(page).toHaveTitle('Products');");
+            assert.throws(() => validateAstIntegrity(currentPom, assertAttack), /Forbidden function call 'expect\(\)'/);
+
+            const execAttack = currentPom.replace("constructor(page) {", "constructor(page) {\n        const cp = require('child_process');");
+            assert.throws(() => validateAstIntegrity(currentPom, execAttack), /Forbidden function call 'require\(\)'/);
+
+            const removeMethodAttack = currentPom.replace(/async goto\(\)\s*\{[\s\S]*?\}/, "");
+            assert.throws(() => validateAstIntegrity(currentPom, removeMethodAttack), /Method count changed/);
+        });
+
+        await runTest("Scenario 7: Multi-file patches remain rejected", () => {
+            const multiFileDiff = [
+                "--- a/tests/pages/ProductListPage.js",
+                "+++ b/tests/pages/ProductListPage.js",
+                "@@ -1,3 +1,3 @@",
+                " line1",
+                "-old1",
+                "+new1",
+                " line2",
+                "--- a/tests/pages/CartPage.js",
+                "+++ b/tests/pages/CartPage.js",
+                "@@ -1,3 +1,3 @@",
+                " line1",
+                "-old2",
+                "+new2",
+                " line2"
+            ].join("\n");
+
+            assert.throws(() => {
+                parseUnifiedDiff(multiFileDiff);
+            }, /Security Violation: Multiple files targeted in patch.*Only single-file POM patches are permitted\./);
+
+            assert.throws(() => {
+                validateUnifiedDiff(multiFileDiff, ROOT_DIR);
+            }, /Security Violation: Multiple files targeted in patch.*Only single-file POM patches are permitted\./);
+        });
+
+        await runTest("Scenario 8: Diagnostic scenario's source commit and artifact metadata agree", () => {
+            const sourceCommit = "8c520a411a03e5f09d79bfae305c302b2f614b77";
+            const runId = "38250394290";
+            const prNumber = "2";
+            const targetPomRel = "tests/pages/ProductListPage.js";
+            const specFileRel = "tests/ui/diagnostic-trial.spec.js";
+
+            const commitCheck = execSync(`git rev-parse --verify ${sourceCommit}`, {
+                cwd: ROOT_DIR,
+                encoding: "utf8"
+            }).trim();
+            assert.strictEqual(commitCheck, sourceCommit);
+
+            const pomAtSource = execSync(`git show ${sourceCommit}:${targetPomRel}`, {
+                cwd: ROOT_DIR,
+                encoding: "utf8"
+            });
+            assert.ok(pomAtSource.includes("Products - Stale Title Indicator"));
+
+            const specAtSource = execSync(`git show ${sourceCommit}:${specFileRel}`, {
+                cwd: ROOT_DIR,
+                encoding: "utf8"
+            });
+            assert.ok(specAtSource.includes("ProductListPage"));
+
+            const mockContextPath = path.resolve(TEST_SANDBOX, "scenario8-context.json");
+            const mockEvidencePath = path.resolve(TEST_SANDBOX, "scenario8-evidence.json");
+
+            fs.writeFileSync(mockContextPath, JSON.stringify({
+                status: "FAILED",
+                timestamp: new Date().toISOString(),
+                commitSha: "synthetic-merge-sha-1234567890abcdef1234",
+                mergeSha: "synthetic-merge-sha-1234567890abcdef1234",
+                headSha: sourceCommit,
+                runAttempt: 1,
+                failures: [{
+                    testTitle: "Catalog heading matches product list title",
+                    specFile: specFileRel,
+                    errorMessage: "locator.toBeVisible: Timeout 5000ms exceeded."
+                }]
+            }), "utf8");
+
+            fs.writeFileSync(mockEvidencePath, JSON.stringify({
+                hasEvidence: true,
+                domSnapshot: "<h1>Products</h1>",
+                accessibilitySnapshot: 'heading "Products" [level=1]'
+            }), "utf8");
+
+            const mockApiClient = ({ command }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: sourceCommit,
+                        headBranch: "test/diagnostic-ci-failure-trial",
+                        event: "pull_request",
+                        attempt: 1,
+                        url: "https://github.com/123bharath/ecommerce-sdet-platform/actions/runs/38250394290"
+                    };
+                }
+                if (command === "pr") {
+                    return {
+                        state: "OPEN",
+                        headRefOid: sourceCommit,
+                        baseRefName: "main",
+                        url: "https://github.com/123bharath/ecommerce-sdet-platform/pull/2"
+                    };
+                }
+                throw new Error(`Unexpected command: ${command}`);
+            };
+
+            const verification = verifyCiMetadata({
+                ciRunId: runId,
+                sourceCommit: sourceCommit,
+                prNumber: prNumber,
+                targetPom: targetPomRel,
+                testSpec: specFileRel,
+                contextPath: mockContextPath,
+                evidencePath: mockEvidencePath,
+                expectedRepo: "123bharath/ecommerce-sdet-platform",
+                apiClient: mockApiClient
+            });
+
+            assert.strictEqual(verification.valid, true, `Verification must pass: ${verification.error} - ${verification.message}`);
+            assert.strictEqual(verification.targetFile, targetPomRel);
+            assert.strictEqual(verification.testFile, specFileRel);
         });
 
         console.log(`\n============================================================`);
