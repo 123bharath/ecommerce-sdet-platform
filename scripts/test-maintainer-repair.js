@@ -438,14 +438,16 @@ async function runAll() {
         });
 
         await runTest("Rejects when CI run attempt does not match context run attempt (RUN_ATTEMPT_MISMATCH)", () => {
+            let capturedArgs = null;
             const mockApi = ({ command, args }) => {
                 if (command === "run") {
+                    capturedArgs = args;
                     return {
                         status: "completed",
                         conclusion: "failure",
                         headSha: validSha,
                         event: "pull_request",
-                        runAttempt: 2
+                        attempt: 2 // Real GitHub CLI field name
                     };
                 }
                 throw new Error("Unexpected command");
@@ -470,6 +472,92 @@ async function runAll() {
             assert.strictEqual(res.valid, false);
             assert.strictEqual(res.error, "RUN_ATTEMPT_MISMATCH");
             assert(res.message.includes("run attempt #1, but CI run is currently on attempt #2"));
+
+            // Verify CLI arguments strictly use supported 'attempt' and not unsupported 'runAttempt'
+            assert(capturedArgs, "API client should have been invoked with args");
+            const jsonIdx = capturedArgs.indexOf("--json");
+            assert(jsonIdx !== -1, "gh run view must specify --json");
+            const jsonFields = capturedArgs[jsonIdx + 1];
+            assert(jsonFields.includes("attempt"), "gh run view --json must request supported 'attempt' field");
+            assert(!jsonFields.includes("runAttempt"), "gh run view --json must NOT request unsupported 'runAttempt' field");
+        });
+
+        await runTest("Approves when CI run attempt (via supported CLI field 'attempt') matches context runAttempt", () => {
+            const mockApi = ({ command, args }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: validSha,
+                        event: "pull_request",
+                        attempt: 1 // Real GitHub CLI field name
+                    };
+                }
+                if (command === "pr") {
+                    return { state: "OPEN", headRefOid: validSha, headRefName: "feature", baseRefName: "main" };
+                }
+                throw new Error("Unexpected command");
+            };
+
+            const matchAttemptContextPath = path.resolve(TEST_SANDBOX, "match-attempt-context.json");
+            fs.writeFileSync(matchAttemptContextPath, JSON.stringify({
+                timestamp: new Date().toISOString(),
+                commitSha: validSha,
+                headSha: validSha,
+                runId: "123456",
+                runAttempt: 1,
+                failures: [{
+                    targetFile: "tests/pages/ProductListPage.js",
+                    specFile: "tests/ui/product-list.spec.js"
+                }]
+            }));
+
+            const res = verifyCiMetadata({
+                ciRunId: "123456",
+                sourceCommit: validSha,
+                prNumber: "2",
+                contextPath: matchAttemptContextPath,
+                evidencePath: sampleEvidencePath,
+                apiClient: mockApi,
+                gitRunner: () => true
+            });
+            assert.strictEqual(res.valid, true);
+            assert.strictEqual(res.runAttempt, 1);
+        });
+
+        await runTest("Supports backwards-compatible 'runAttempt' if provided by mock client", () => {
+            const mockApi = ({ command, args }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: validSha,
+                        event: "pull_request",
+                        runAttempt: 3
+                    };
+                }
+                throw new Error("Unexpected command");
+            };
+
+            const legacyAttemptContextPath = path.resolve(TEST_SANDBOX, "legacy-attempt-context.json");
+            fs.writeFileSync(legacyAttemptContextPath, JSON.stringify({
+                timestamp: new Date().toISOString(),
+                commitSha: validSha,
+                runId: "123456",
+                runAttempt: 1,
+                failures: [{ targetFile: "tests/pages/ProductListPage.js" }]
+            }));
+
+            const res = verifyCiMetadata({
+                ciRunId: "123456",
+                sourceCommit: validSha,
+                contextPath: legacyAttemptContextPath,
+                evidencePath: sampleEvidencePath,
+                apiClient: mockApi
+            });
+            assert.strictEqual(res.valid, false);
+            assert.strictEqual(res.error, "RUN_ATTEMPT_MISMATCH");
+            assert(res.message.includes("run attempt #1, but CI run is currently on attempt #3"));
         });
 
         await runTest("Rejects when requested source_commit is the transient PR merge commit (MERGE_SHA_REJECTED)", () => {
@@ -742,7 +830,7 @@ async function runAll() {
                         headSha: validSha,
                         event: "workflow_dispatch",
                         databaseId: 123456,
-                        runAttempt: 1
+                        attempt: 1
                     };
                 }
                 throw new Error("Unexpected command");
@@ -783,7 +871,7 @@ async function runAll() {
                         headSha: validSha,
                         event: "workflow_dispatch",
                         databaseId: 123456,
-                        runAttempt: 1
+                        attempt: 1
                     };
                 }
                 if (command === "pr") {
@@ -815,7 +903,7 @@ async function runAll() {
                         headSha: validSha,
                         event: "workflow_dispatch",
                         databaseId: 123456,
-                        runAttempt: 1
+                        attempt: 1
                     };
                 }
                 throw new Error("Unexpected command");

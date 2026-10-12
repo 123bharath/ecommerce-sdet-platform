@@ -932,7 +932,7 @@ async function runAll() {
             assert.strictEqual(validation.targetFile, "tests/pages/ProductListPage.js");
 
             const applied = applyUnifiedDiff(origPom, diff);
-            assert.strictEqual(applied.trim(), updatedCode.trim());
+            assert.strictEqual(applied.replace(/\r\n/g, "\n").trim(), updatedCode.replace(/\r\n/g, "\n").trim());
         });
 
         // --------------------------------------------------------------------------
