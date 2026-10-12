@@ -16,8 +16,14 @@ const GEMINI_MD_PATH = path.resolve(ROOT_DIR, "GEMINI.md");
 // Security whitelist: ONLY Page Object Model files inside tests/pages/ may be targeted
 const APPROVED_TARGET_DIR = path.resolve(ROOT_DIR, "tests/pages");
 
+<<<<<<< HEAD
 // Model configuration: Documented default model is gemini-3.8-flash, configurable via GEMINI_MODEL env var
 const DEFAULT_MODEL = "gemini-3.8-flash";
+=======
+// Model configuration: Primary model defaults to gemini-3.5-flash, fallback to gemini-3.5-flash-lite
+const DEFAULT_MODEL = "gemini-3.5-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
 /**
  * Validates test-results/healing-context.json.
@@ -146,8 +152,14 @@ function validateTargetFile(targetFileRel, rootDir = ROOT_DIR) {
     const normalized = path.normalize(targetFileRel).replace(/\\/g, "/");
     const resolvedPath = path.resolve(rootDir, normalized);
 
+<<<<<<< HEAD
     // Verify target resides strictly within APPROVED_TARGET_DIR (tests/pages/)
     const relativeToPages = path.relative(APPROVED_TARGET_DIR, resolvedPath);
+=======
+    // Verify target resides strictly within tests/pages/ under rootDir
+    const approvedTargetDir = path.resolve(rootDir, "tests/pages");
+    const relativeToPages = path.relative(approvedTargetDir, resolvedPath);
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     if (relativeToPages.startsWith("..") || path.isAbsolute(relativeToPages)) {
         throw new Error(`Security Violation: Changes are strictly restricted to tests/pages/*.js. Rejected: '${targetFileRel}'.`);
     }
@@ -299,6 +311,11 @@ function checkPermittedLocatorChanges(addedLines) {
         /^\s*(?:async\s+)?[a-zA-Z0-9_$]+\s*\([^)]*\)\s*\{?\s*$/,
         /^\s*[\{\}\(\)\[\],;]+\s*$/,
         /^\s*\/\//,
+<<<<<<< HEAD
+=======
+        /^\s*\/\*+/,
+        /^\s*\*+(\/)?/,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         /^\s*$/
     ];
 
@@ -868,6 +885,20 @@ function validateUnifiedDiff(diffString, rootDir = ROOT_DIR, options = {}) {
         originalContent = fs.readFileSync(resolvedPath, "utf8");
     }
 
+<<<<<<< HEAD
+=======
+    // Verify all removed lines exist in originalContent
+    const origTrimmedLines = originalContent.split(/\r?\n/).map((l) => l.trim());
+    for (const hunk of parsed.hunks) {
+        for (const removedLine of hunk.removedLines) {
+            const trimmedRemoved = removedLine.trim();
+            if (trimmedRemoved && !origTrimmedLines.includes(trimmedRemoved)) {
+                throw new Error(`Security Violation: Removed line '${trimmedRemoved}' does not exist in target file at source commit.`);
+            }
+        }
+    }
+
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     const patchedContent = applyUnifiedDiff(originalContent, diffString);
 
     // 4. Validate overall patch integrity, JavaScript syntax, and class structure
@@ -898,10 +929,32 @@ function validatePatchAst(diffString, expectedTargetFile, sourceCommit = null, r
 
 /**
  * Generates a standard unified diff string between original and patched contents.
+<<<<<<< HEAD
  */
 function generateUnifiedDiff(relPath, originalContent, patchedContent) {
     const origLines = originalContent.split(/\r?\n/);
     const patchedLines = patchedContent.split(/\r?\n/);
+=======
+ * Includes context lines (default 3) to allow standard patch tools (e.g. git apply)
+ * to cleanly anchor hunks.
+ */
+function generateUnifiedDiff(relPath, originalContent, patchedContent, options = {}) {
+    let origNorm = (originalContent || "").replace(/\r\n/g, "\n");
+    let patchedNorm = (patchedContent || "").replace(/\r\n/g, "\n");
+    if (origNorm.endsWith("\n") && !patchedNorm.endsWith("\n")) {
+        patchedNorm += "\n";
+    } else if (!origNorm.endsWith("\n") && patchedNorm.endsWith("\n")) {
+        origNorm += "\n";
+    }
+
+    const hasTrailingNewline = origNorm.endsWith("\n");
+    const origRaw = hasTrailingNewline ? origNorm.slice(0, -1) : origNorm;
+    const origLines = origRaw.length > 0 ? origRaw.split("\n") : [];
+
+    const patchedHasTrailingNewline = patchedNorm.endsWith("\n");
+    const patchedRaw = patchedHasTrailingNewline ? patchedNorm.slice(0, -1) : patchedNorm;
+    const patchedLines = patchedRaw.length > 0 ? patchedRaw.split("\n") : [];
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     let start = 0;
     while (start < origLines.length && start < patchedLines.length && origLines[start] === patchedLines[start]) {
@@ -915,16 +968,39 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent) {
         patchedEnd--;
     }
 
+<<<<<<< HEAD
     const removedLines = origLines.slice(start, origEnd + 1);
     const addedLines = patchedLines.slice(start, patchedEnd + 1);
 
     const origCount = removedLines.length;
     const patchedCount = addedLines.length;
     const startLineNum = start + 1;
+=======
+    if (start > origEnd && start > patchedEnd) {
+        return "";
+    }
+
+    const removedLines = origLines.slice(start, origEnd + 1);
+    const addedLines = patchedLines.slice(start, patchedEnd + 1);
+
+    const contextCount = (typeof options === "number" ? options : options?.context) ?? 3;
+
+    const leadingContextStart = Math.max(0, start - contextCount);
+    const leadingContext = origLines.slice(leadingContextStart, start);
+
+    const trailingContextEnd = Math.min(origLines.length, origEnd + 1 + contextCount);
+    const trailingContext = origLines.slice(origEnd + 1, trailingContextEnd);
+
+    const oldHunkStart = leadingContextStart + 1;
+    const oldHunkCount = leadingContext.length + removedLines.length + trailingContext.length;
+    const newHunkStart = leadingContextStart + 1;
+    const newHunkCount = leadingContext.length + addedLines.length + trailingContext.length;
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     const diffHeader = [
         `--- a/${relPath}`,
         `+++ b/${relPath}`,
+<<<<<<< HEAD
         `@@ -${startLineNum},${origCount} +${startLineNum},${patchedCount} @@`
     ];
 
@@ -933,6 +1009,22 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent) {
         ...addedLines.map((line) => `+${line}`)
     ];
 
+=======
+        `@@ -${oldHunkStart},${oldHunkCount} +${newHunkStart},${newHunkCount} @@`
+    ];
+
+    const diffBody = [
+        ...leadingContext.map((line) => ` ${line}`),
+        ...removedLines.map((line) => `-${line}`),
+        ...addedLines.map((line) => `+${line}`),
+        ...trailingContext.map((line) => ` ${line}`)
+    ];
+
+    if (!hasTrailingNewline && trailingContextEnd >= origLines.length) {
+        diffBody.push("\\ No newline at end of file");
+    }
+
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     return [...diffHeader, ...diffBody, ""].join("\n");
 }
 
@@ -1155,7 +1247,15 @@ ${evidenceSection}
    - Prioritize semantic, user-facing Playwright locators (page.getByRole, page.getByLabel, page.getByText, page.getByTestId) supported by the observed evidence over brittle CSS selectors.
 4. If the root cause is NOT 'STALE_LOCATOR' or cannot be safely healed, set "canHeal": false.
 5. NEVER modify application source code, configuration files, or test assertions.
+<<<<<<< HEAD
 6. Return ONLY a valid JSON object matching the schema below.
+=======
+6. MINIMAL SURGICAL REPAIR & POM CONFINEMENT:
+   - In "patchedFileContent", return the complete updated target POM code with ONLY the stale locator property or method modified.
+   - Strictly preserve all other code, class methods, comments, JSDoc annotations, formatting, indentation, and file endings exactly as provided in the target POM.
+   - NEVER add extra statements, helper functions, state variables, loops, conditionals, or non-locator logic.
+7. Return ONLY a valid JSON object matching the schema below.
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
 === RESPONSE SCHEMA (JSON ONLY) ===
 {
@@ -1166,7 +1266,11 @@ ${evidenceSection}
   "targetFile": "relative path to target POM (e.g. tests/pages/ProductListPage.js)",
   "originalLocator": "previous selector string",
   "healedLocator": "new resilient accessible selector string",
+<<<<<<< HEAD
   "patchedFileContent": "Full updated code of targetFile with surgical fix applied"
+=======
+  "patchedFileContent": "Full updated code of targetFile with minimal surgical locator fix applied, strictly preserving existing comments and methods"
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 }
 `;
 }
@@ -1184,6 +1288,7 @@ function sanitizeJsonResponse(rawText) {
 }
 
 /**
+<<<<<<< HEAD
  * Invokes Gemini model or test mock to produce repair proposal.
  * Priority: options.model -> process.env.GEMINI_MODEL -> DEFAULT_MODEL.
  */
@@ -1253,6 +1358,185 @@ async function invokeModel({ prompt, apiKey, modelClient, model, timeoutMs = 600
             throw err;
         }
     }
+=======
+ * Redacts API keys and sensitive tokens from error messages and logs.
+ */
+function sanitizeErrorMessage(msg, apiKey = null) {
+    if (!msg) return "";
+    let str = typeof msg === "string" ? msg : String(msg?.message || msg);
+    if (apiKey && typeof apiKey === "string" && apiKey.length > 5) {
+        str = str.split(apiKey).join("[REDACTED_API_KEY]");
+    }
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5) {
+        str = str.split(process.env.GEMINI_API_KEY).join("[REDACTED_API_KEY]");
+    }
+    str = str.replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]");
+    str = str.replace(/([?&]key=)[^&\s"']+/gi, "$1[REDACTED_API_KEY]");
+    return str;
+}
+
+/**
+ * Classifies an error as transient (eligible for retry and model fallback)
+ * or permanent (fail immediately without retry).
+ */
+function isTransientError(err) {
+    if (!err) return false;
+    const msg = typeof err === "string" ? err : (err.message || String(err));
+    const status = err.status || err.statusCode || err.code;
+
+    // Definite permanent HTTP statuses
+    if (status === 400 || status === 401 || status === 403) {
+        return false;
+    }
+
+    // Permanent error patterns in message
+    if (/401|403|unauthorized|forbidden|unauthenticated|permission_denied|api_key_invalid|invalid_api_key|api key not valid|missing_api_key|invalid_argument|malformed_request|bad request/i.test(msg)) {
+        return false;
+    }
+
+    // Check transient status codes
+    if ([429, 500, 502, 503, 504].includes(Number(status))) {
+        return true;
+    }
+
+    // Check transient error patterns in message or code
+    if (/503|429|500|502|504|UNAVAILABLE|RESOURCE_EXHAUSTED|RATE_LIMIT|rate limit|quota|high demand|overloaded|timeout|timed out|AbortError|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network error|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(msg)) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Invokes Gemini model or test mock to produce repair proposal.
+ * Priority: options.model -> process.env.GEMINI_MODEL -> DEFAULT_MODEL.
+ * Handles transient errors with bounded exponential backoff and cascades to fallback model
+ * only after primary model retries are exhausted.
+ * Permanent errors (e.g. invalid API key, 400 Bad Request) fail immediately without retrying or fallback.
+ */
+async function invokeModel({
+    prompt,
+    apiKey,
+    modelClient,
+    model,
+    fallbackModel,
+    timeoutMs = 60000,
+    maxAttemptsPerModel = 3,
+    baseDelayMs = 1000,
+    maxDelayMs = 10000
+}) {
+    const primaryModel = model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+    const resolvedFallbackModel = fallbackModel !== undefined
+        ? fallbackModel
+        : (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL);
+
+    const modelsToTry = [primaryModel];
+    if (resolvedFallbackModel && resolvedFallbackModel !== primaryModel) {
+        modelsToTry.push(resolvedFallbackModel);
+    }
+
+    const resolvedApiKey = apiKey || process.env.GEMINI_API_KEY;
+    if (!modelClient && !resolvedApiKey) {
+        throw new Error("MISSING_API_KEY: GEMINI_API_KEY environment variable is required.");
+    }
+
+    let lastError = null;
+
+    for (let modelIndex = 0; modelIndex < modelsToTry.length; modelIndex++) {
+        const currentModel = modelsToTry[modelIndex];
+        const isFallback = modelIndex > 0;
+
+        if (isFallback) {
+            console.warn(`[AI Repair Agent] Primary model (${modelsToTry[0]}) retries exhausted. Cascading to fallback model: ${currentModel}...`);
+        }
+
+        for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+            try {
+                let parsed;
+                if (modelClient) {
+                    const clientRes = await modelClient.generateContent({ prompt, model: currentModel });
+                    if (!clientRes) {
+                        throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
+                    }
+                    parsed = clientRes;
+                } else {
+                    const { GoogleGenAI } = await import("@google/genai");
+                    const ai = new GoogleGenAI({ apiKey: resolvedApiKey });
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+                    try {
+                        const response = await ai.models.generateContent({
+                            model: currentModel,
+                            contents: prompt,
+                            config: {
+                                responseMimeType: "application/json",
+                                responseSchema: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        canHeal: { type: "BOOLEAN", description: "Whether failure is a stale locator that can be healed" },
+                                        rootCause: { type: "STRING", enum: ["STALE_LOCATOR", "APPLICATION_DEFECT", "TEST_DATA_ISSUE", "ENVIRONMENT_ISSUE"] },
+                                        diagnosis: { type: "STRING", description: "Explanation grounded in evidence" },
+                                        evidenceObserved: { type: "STRING", description: "Observed DOM or accessibility evidence" },
+                                        targetFile: { type: "STRING", description: "Exact relative path of POM file, e.g. tests/pages/ProductListPage.js" },
+                                        originalLocator: { type: "STRING", description: "Previous selector to replace" },
+                                        healedLocator: { type: "STRING", description: "New accessible Playwright locator" },
+                                        patchedFileContent: { type: "STRING", description: "Complete updated source code of target POM file" }
+                                    },
+                                    required: ["canHeal", "rootCause", "diagnosis", "targetFile", "originalLocator", "healedLocator", "patchedFileContent"]
+                                },
+                                temperature: 0.1,
+                                maxOutputTokens: 8192
+                            }
+                        });
+                        clearTimeout(timer);
+
+                        const text = response.text || (response.candidates && response.candidates[0]?.content?.parts[0]?.text);
+                        if (!text) {
+                            throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
+                        }
+
+                        const sanitized = sanitizeJsonResponse(text);
+                        parsed = JSON.parse(sanitized);
+                    } catch (callErr) {
+                        clearTimeout(timer);
+                        throw callErr;
+                    }
+                }
+
+                if (parsed && typeof parsed === "object") {
+                    parsed._modelUsed = currentModel;
+                }
+                return parsed;
+            } catch (err) {
+                const sanitizedErrMsg = sanitizeErrorMessage(err.message, resolvedApiKey);
+                lastError = new Error(sanitizedErrMsg);
+                if (err.status) lastError.status = err.status;
+                if (err.statusCode) lastError.statusCode = err.statusCode;
+                if (err.code) lastError.code = err.code;
+
+                // Permanent error: Do NOT retry and do NOT fall back
+                if (!isTransientError(err)) {
+                    console.error(`[AI Repair Agent] Permanent error with ${currentModel}: ${sanitizedErrMsg}. Aborting without retry or fallback.`);
+                    throw lastError;
+                }
+
+                // Transient error: Retry if attempts remaining
+                if (attempt < maxAttemptsPerModel) {
+                    const delayMs = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+                    console.warn(`[AI Repair Agent] Transient error with ${currentModel} (attempt ${attempt}/${maxAttemptsPerModel}): ${sanitizedErrMsg}. Retrying in ${delayMs}ms...`);
+                    if (delayMs > 0) {
+                        await new Promise((r) => setTimeout(r, delayMs));
+                    }
+                } else {
+                    console.warn(`[AI Repair Agent] Transient error attempts exhausted (${maxAttemptsPerModel}/${maxAttemptsPerModel}) for model ${currentModel}: ${sanitizedErrMsg}`);
+                    break;
+                }
+            }
+        }
+    }
+
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     throw lastError;
 }
 
@@ -1282,9 +1566,21 @@ async function runRepairAgent(options = {}) {
     const apiKey = options.apiKey || process.env.GEMINI_API_KEY;
     const targetPomRel = options.targetPomRel || "tests/pages/ProductListPage.js";
     const selectedModel = options.model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+<<<<<<< HEAD
 
     console.log("=== Antigravity Programmatic AI Repair Agent (Phase 1) ===\n");
     console.log(`[AI Repair Agent] Configured model: ${selectedModel}`);
+=======
+    const fallbackModel = options.fallbackModel !== undefined
+        ? options.fallbackModel
+        : (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL);
+
+    console.log("=== Antigravity Programmatic AI Repair Agent (Phase 1) ===\n");
+    console.log(`[AI Repair Agent] Configured model: ${selectedModel}`);
+    if (fallbackModel && fallbackModel !== selectedModel) {
+        console.log(`[AI Repair Agent] Configured fallback model: ${fallbackModel}`);
+    }
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     const recordSummary = (data) => writeSummary(data, summaryPath, repairDir);
 
@@ -1369,12 +1665,31 @@ async function runRepairAgent(options = {}) {
     let resolvedTargetPomRel = options.targetPomRel || failure.targetFile || null;
     if (!resolvedTargetPomRel && failure.specFile) {
         const specAbs = path.isAbsolute(failure.specFile) ? failure.specFile : path.resolve(ROOT_DIR, failure.specFile);
+<<<<<<< HEAD
         if (fs.existsSync(specAbs)) {
             try {
                 const specCode = fs.readFileSync(specAbs, "utf8");
                 const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
                 if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
             } catch { /* ignore */ }
+=======
+        let specCode = null;
+        if (fs.existsSync(specAbs)) {
+            try {
+                specCode = fs.readFileSync(specAbs, "utf8");
+            } catch { /* ignore */ }
+        } else if (options.sourceCommit) {
+            try {
+                specCode = execSync(`git show ${options.sourceCommit}:${failure.specFile}`, {
+                    cwd: ROOT_DIR,
+                    encoding: "utf8"
+                });
+            } catch { /* ignore */ }
+        }
+        if (specCode) {
+            const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
+            if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         }
     }
     if (!resolvedTargetPomRel) {
@@ -1420,18 +1735,44 @@ async function runRepairAgent(options = {}) {
     console.log(`[AI Repair Agent] Investigating failure: "${failure.testTitle}"...`);
     let modelResponse;
     try {
+<<<<<<< HEAD
         modelResponse = await invokeModel({ prompt, apiKey, modelClient, model: selectedModel });
     } catch (err) {
         console.error(`[AI Repair Agent] Model invocation failed: ${err.message}`);
         const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: err.message, model: selectedModel };
+=======
+        modelResponse = await invokeModel({
+            prompt,
+            apiKey,
+            modelClient,
+            model: selectedModel,
+            fallbackModel,
+            baseDelayMs: options.baseDelayMs,
+            maxAttemptsPerModel: options.maxAttemptsPerModel,
+            timeoutMs: options.timeoutMs
+        });
+    } catch (err) {
+        const sanitizedErrMsg = sanitizeErrorMessage(err.message, apiKey);
+        console.error(`[AI Repair Agent] Model invocation failed: ${sanitizedErrMsg}`);
+        const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: sanitizedErrMsg, model: selectedModel };
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         recordSummary(result);
         return result;
     }
 
+<<<<<<< HEAD
     // 7. Process model response
     if (!modelResponse || typeof modelResponse !== "object") {
         console.error("[AI Repair Agent] Model returned malformed response object.");
         const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT" };
+=======
+    const actualModelUsed = modelResponse?._modelUsed || selectedModel;
+
+    // 7. Process model response
+    if (!modelResponse || typeof modelResponse !== "object") {
+        console.error("[AI Repair Agent] Model returned malformed response object.");
+        const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT", model: actualModelUsed };
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         recordSummary(result);
         return result;
     }
@@ -1441,6 +1782,10 @@ async function runRepairAgent(options = {}) {
         console.log(`[AI Repair Agent] Diagnosis: ${modelResponse.diagnosis}`);
         const result = {
             status: "ABSTAINED",
+<<<<<<< HEAD
+=======
+            model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             rootCause: modelResponse.rootCause,
             reason: modelResponse.canHeal ? "NOT_STALE_LOCATOR" : "INSUFFICIENT_EVIDENCE_OR_DEFECT",
             diagnosis: modelResponse.diagnosis,
@@ -1450,6 +1795,24 @@ async function runRepairAgent(options = {}) {
         return result;
     }
 
+<<<<<<< HEAD
+=======
+    // Guard against fabricating repairs: If target file already contains the healed locator, abstain
+    if (modelResponse.healedLocator && originalPomContent.includes(modelResponse.healedLocator)) {
+        console.log(`[AI Repair Agent] Target file already contains proposed locator: '${modelResponse.healedLocator}'. Abstaining.`);
+        const result = {
+            status: "ABSTAINED",
+            reason: "ALREADY_HEALED",
+            model: actualModelUsed,
+            rootCause: modelResponse.rootCause,
+            diagnosis: "The proposed healed locator is already present in the target Page Object at the source commit.",
+            targetFile: modelResponse.targetFile || resolvedTargetPomRel
+        };
+        recordSummary(result);
+        return result;
+    }
+
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     // 8. Security verification on proposed patch code
     try {
         if (modelResponse.targetFile) {
@@ -1465,9 +1828,16 @@ async function runRepairAgent(options = {}) {
         }
         if (!modelResponse.patchedFileContent && modelResponse.healedLocator) {
             const staleTarget = modelResponse.originalLocator || failure.targetLocator;
+<<<<<<< HEAD
             if (staleTarget && originalPomContent.includes(staleTarget)) {
                 modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
             }
+=======
+            if (!staleTarget || !originalPomContent.includes(staleTarget)) {
+                throw new Error(`Security Violation: Stale locator '${staleTarget || "undefined"}' does not exist in target file at source commit.`);
+            }
+            modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         }
         validateTargetFile(modelResponse.targetFile, ROOT_DIR);
         validatePatchIntegrity(originalPomContent, modelResponse.patchedFileContent);
@@ -1476,6 +1846,10 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
+<<<<<<< HEAD
+=======
+            model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1490,6 +1864,10 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "ABSTAINED",
             reason: "GROUNDING_VIOLATION",
+<<<<<<< HEAD
+=======
+            model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: groundingCheck.reason,
             targetFile: modelResponse.targetFile
         };
@@ -1503,10 +1881,18 @@ async function runRepairAgent(options = {}) {
     try {
         validateUnifiedDiff(patchContent, ROOT_DIR, { sourceCommit: options.sourceCommit });
     } catch (err) {
+<<<<<<< HEAD
         console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}`);
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
+=======
+        console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}\n[AI Repair Agent] Rejected patch content:\n${patchContent}`);
+        const result = {
+            status: "REJECTED",
+            reason: "SECURITY_VIOLATION",
+            model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1526,7 +1912,11 @@ async function runRepairAgent(options = {}) {
         const generatedResult = {
             status: "GENERATED",
             canHeal: true,
+<<<<<<< HEAD
             model: selectedModel,
+=======
+            model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             rootCause: modelResponse.rootCause,
             diagnosis: modelResponse.diagnosis,
             targetFile: modelResponse.targetFile,
@@ -1558,7 +1948,11 @@ async function runRepairAgent(options = {}) {
                 const failureResult = {
                     status: "VALIDATION_FAILED",
                     reason: "TEST_VERIFICATION_FAILED",
+<<<<<<< HEAD
                     model: selectedModel,
+=======
+                    model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                     rootCause: modelResponse.rootCause,
                     diagnosis: modelResponse.diagnosis,
                     targetFile: modelResponse.targetFile,
@@ -1575,7 +1969,11 @@ async function runRepairAgent(options = {}) {
             console.log(`[AI Repair Agent] Isolated candidate verification passed! Repair verified.`);
             const verifiedResult = {
                 status: "VERIFIED",
+<<<<<<< HEAD
                 model: selectedModel,
+=======
+                model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                 rootCause: modelResponse.rootCause,
                 diagnosis: modelResponse.diagnosis,
                 targetFile: modelResponse.targetFile,
@@ -1591,7 +1989,11 @@ async function runRepairAgent(options = {}) {
             const errorResult = {
                 status: "VALIDATION_FAILED",
                 reason: "ISOLATION_ERROR",
+<<<<<<< HEAD
                 model: selectedModel,
+=======
+                model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                 message: err.message,
                 patchPath: patchPath
             };
@@ -1602,7 +2004,11 @@ async function runRepairAgent(options = {}) {
 
     const summaryResult = {
         status: "PROPOSED",
+<<<<<<< HEAD
         model: selectedModel,
+=======
+        model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         rootCause: modelResponse.rootCause,
         diagnosis: modelResponse.diagnosis,
         targetFile: modelResponse.targetFile,
@@ -1907,6 +2313,63 @@ function writeSummary(data, targetSummaryPath = SUMMARY_PATH, targetRepairDir = 
     }
 }
 
+<<<<<<< HEAD
+=======
+/**
+ * Resolves and validates candidate patch artifact layout.
+ * Ensures repair.patch exists, is non-empty, and normalizes nested directory layouts if present.
+ * Throws clear, descriptive errors if candidate directory or patch is missing or empty.
+ *
+ * @param {string} candidateDir - Path to candidate patch directory
+ * @returns {{ patchPath: string, summaryPath: string|null, size: number }}
+ */
+function resolveCandidatePatch(candidateDir) {
+    if (!candidateDir || typeof candidateDir !== "string") {
+        throw new Error("Candidate directory path must be a non-empty string.");
+    }
+    const absDir = path.resolve(candidateDir);
+    if (!fs.existsSync(absDir)) {
+        throw new Error(`Candidate directory does not exist: '${absDir}'.`);
+    }
+
+    const flatPatch = path.resolve(absDir, "repair.patch");
+    const flatSummary = path.resolve(absDir, "repair-summary.json");
+
+    if (!fs.existsSync(flatPatch)) {
+        // Inspect immediate subdirectories for nested artifact structure (e.g. candidate-output, candidate-patch)
+        const entries = fs.readdirSync(absDir, { withFileTypes: true });
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                const subPatch = path.resolve(absDir, entry.name, "repair.patch");
+                const subSummary = path.resolve(absDir, entry.name, "repair-summary.json");
+                if (fs.existsSync(subPatch)) {
+                    fs.copyFileSync(subPatch, flatPatch);
+                    if (fs.existsSync(subSummary) && !fs.existsSync(flatSummary)) {
+                        fs.copyFileSync(subSummary, flatSummary);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!fs.existsSync(flatPatch)) {
+        throw new Error(`Candidate patch missing: Expected patch file at '${flatPatch}'.`);
+    }
+
+    const stat = fs.statSync(flatPatch);
+    if (stat.size === 0) {
+        throw new Error(`Candidate patch is empty (0 bytes): '${flatPatch}'.`);
+    }
+
+    return {
+        patchPath: flatPatch,
+        summaryPath: fs.existsSync(flatSummary) ? flatSummary : null,
+        size: stat.size
+    };
+}
+
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 if (require.main === module) {
     const args = process.argv.slice(2);
     const getArg = (flag) => {
@@ -1918,6 +2381,10 @@ if (require.main === module) {
     const generateOnly = args.includes("--generate-only");
     const isolationMode = args.includes("--worktree") ? "worktree" : "directory";
     const model = getArg("--model");
+<<<<<<< HEAD
+=======
+    const fallbackModel = getArg("--fallback-model");
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     const evidencePath = getArg("--evidence");
     const requireEvidence = args.includes("--require-evidence") || Boolean(evidencePath);
     const contextPath = getArg("--context");
@@ -1931,6 +2398,10 @@ if (require.main === module) {
         generateOnly,
         isolationMode,
         model,
+<<<<<<< HEAD
+=======
+        fallbackModel,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         evidencePath,
         requireEvidence,
         sourceCommit,
@@ -1948,6 +2419,13 @@ if (require.main === module) {
 
 module.exports = {
     DEFAULT_MODEL,
+<<<<<<< HEAD
+=======
+    DEFAULT_FALLBACK_MODEL,
+    resolveCandidatePatch,
+    isTransientError,
+    sanitizeErrorMessage,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     validateContext,
     classifyPreFilter,
     validateTargetFile,
