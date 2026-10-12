@@ -5,7 +5,11 @@ const {
     isValidGitRef,
     validateTargetPomPath,
     validateTestSpecPath,
-    verifyCiMetadata
+    verifyCiMetadata,
+    resolveRunRepository,
+    resolvePrRepository,
+    extractRepoFromRunUrl,
+    extractRepoFromPrUrl
 } = require("./verify-ci-metadata");
 const {
     validatePatchAst,
@@ -313,6 +317,154 @@ async function runAll() {
             assert(res.message.includes("does not match expected repository"));
         });
 
+        await runTest("Rejects when CI run repository from canonical URL does not match expected repository (REPOSITORY_MISMATCH)", () => {
+            const mockApi = ({ command, args }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: validSha,
+                        event: "pull_request",
+                        url: "https://github.com/attacker/malicious-repo/actions/runs/123456"
+                    };
+                }
+                throw new Error("Unexpected command");
+            };
+
+            const res = verifyCiMetadata({
+                ciRunId: "123456",
+                sourceCommit: validSha,
+                expectedRepo: "123bharath/ecommerce-sdet-platform",
+                contextPath: "c.json",
+                evidencePath: "e.json",
+                apiClient: mockApi
+            });
+            assert.strictEqual(res.valid, false);
+            assert.strictEqual(res.error, "REPOSITORY_MISMATCH");
+            assert(res.message.includes("attacker/malicious-repo"));
+        });
+
+        await runTest("Approves when CI run repository from canonical URL matches expected repository", () => {
+            const mockApi = ({ command, args }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: validSha,
+                        event: "pull_request",
+                        attempt: 1,
+                        url: "https://github.com/123bharath/ecommerce-sdet-platform/actions/runs/123456"
+                    };
+                }
+                if (command === "pr") {
+                    return {
+                        state: "OPEN",
+                        headRefOid: validSha,
+                        headRefName: "test-branch",
+                        baseRefName: "main",
+                        url: "https://github.com/123bharath/ecommerce-sdet-platform/pull/2"
+                    };
+                }
+                throw new Error("Unexpected command");
+            };
+
+            const repoMatchContextPath = path.resolve(TEST_SANDBOX, "repo-match-context.json");
+            fs.writeFileSync(repoMatchContextPath, JSON.stringify({
+                timestamp: new Date().toISOString(),
+                commitSha: validSha,
+                headSha: validSha,
+                runId: "123456",
+                runAttempt: 1,
+                repository: "123bharath/ecommerce-sdet-platform",
+                failures: [{
+                    targetFile: "tests/pages/ProductListPage.js",
+                    specFile: "tests/ui/product-list.spec.js"
+                }]
+            }));
+
+            const sampleEvidencePath = path.resolve(TEST_SANDBOX, "repo-sample-evidence.json");
+            fs.writeFileSync(sampleEvidencePath, JSON.stringify({
+                hasEvidence: true,
+                domSnapshot: "<h1>Products</h1>",
+                accessibilitySnapshot: "heading 'Products'"
+            }));
+
+            const res = verifyCiMetadata({
+                ciRunId: "123456",
+                sourceCommit: validSha,
+                prNumber: "2",
+                expectedRepo: "123bharath/ecommerce-sdet-platform",
+                contextPath: repoMatchContextPath,
+                evidencePath: sampleEvidencePath,
+                apiClient: mockApi,
+                gitRunner: () => true
+            });
+            assert.strictEqual(res.valid, true);
+        });
+
+        await runTest("Rejects when PR repository does not match expected repository (REPOSITORY_MISMATCH)", () => {
+            const mockApi = ({ command, args }) => {
+                if (command === "run") {
+                    return {
+                        status: "completed",
+                        conclusion: "failure",
+                        headSha: validSha,
+                        event: "pull_request",
+                        attempt: 1,
+                        url: "https://github.com/123bharath/ecommerce-sdet-platform/actions/runs/123456"
+                    };
+                }
+                if (command === "pr") {
+                    return {
+                        state: "OPEN",
+                        headRefOid: validSha,
+                        headRefName: "test-branch",
+                        baseRefName: "main",
+                        headRepository: { nameWithOwner: "external/untrusted-fork" }
+                    };
+                }
+                throw new Error("Unexpected command");
+            };
+
+            const prRepoContextPath = path.resolve(TEST_SANDBOX, "pr-repo-context.json");
+            fs.writeFileSync(prRepoContextPath, JSON.stringify({
+                timestamp: new Date().toISOString(),
+                commitSha: validSha,
+                headSha: validSha,
+                runId: "123456",
+                runAttempt: 1,
+                repository: "123bharath/ecommerce-sdet-platform",
+                failures: [{ targetFile: "tests/pages/ProductListPage.js" }]
+            }));
+
+            const sampleEvidencePath = path.resolve(TEST_SANDBOX, "repo-sample-evidence.json");
+            const res = verifyCiMetadata({
+                ciRunId: "123456",
+                sourceCommit: validSha,
+                prNumber: "2",
+                expectedRepo: "123bharath/ecommerce-sdet-platform",
+                contextPath: prRepoContextPath,
+                evidencePath: sampleEvidencePath,
+                apiClient: mockApi
+            });
+            assert.strictEqual(res.valid, false);
+            assert.strictEqual(res.error, "REPOSITORY_MISMATCH");
+            assert(res.message.includes("external/untrusted-fork"));
+        });
+
+        await runTest("extractRepoFromRunUrl and resolveRunRepository handle various formats correctly", () => {
+            assert.strictEqual(extractRepoFromRunUrl("https://github.com/foo/bar/actions/runs/123"), "foo/bar");
+            assert.strictEqual(extractRepoFromRunUrl("http://github.com/foo/bar/actions/runs/99999999"), "foo/bar");
+            assert.strictEqual(extractRepoFromRunUrl("invalid-url"), null);
+            assert.strictEqual(extractRepoFromRunUrl(null), null);
+
+            assert.strictEqual(resolveRunRepository({ url: "https://github.com/my-org/my-repo/actions/runs/42" }), "my-org/my-repo");
+            assert.strictEqual(resolveRunRepository({ headRepository: { nameWithOwner: "custom/repo" } }), "custom/repo");
+            assert.strictEqual(resolveRunRepository({ repository: "string/repo" }), "string/repo");
+            assert.strictEqual(resolveRunRepository({ repository: { full_name: "obj/repo" } }), "obj/repo");
+            assert.strictEqual(resolveRunRepository({}), null);
+        });
+
         // =========================================================================
         // SUITE 3: Artifact Lineage, Freshness & Evidence Verification
         // =========================================================================
@@ -473,13 +625,15 @@ async function runAll() {
             assert.strictEqual(res.error, "RUN_ATTEMPT_MISMATCH");
             assert(res.message.includes("run attempt #1, but CI run is currently on attempt #2"));
 
-            // Verify CLI arguments strictly use supported 'attempt' and not unsupported 'runAttempt'
+            // Verify CLI arguments strictly use supported fields and omit unsupported fields
             assert(capturedArgs, "API client should have been invoked with args");
             const jsonIdx = capturedArgs.indexOf("--json");
             assert(jsonIdx !== -1, "gh run view must specify --json");
             const jsonFields = capturedArgs[jsonIdx + 1];
             assert(jsonFields.includes("attempt"), "gh run view --json must request supported 'attempt' field");
+            assert(jsonFields.includes("url"), "gh run view --json must request supported 'url' field for repo resolution");
             assert(!jsonFields.includes("runAttempt"), "gh run view --json must NOT request unsupported 'runAttempt' field");
+            assert(!jsonFields.includes("headRepository"), "gh run view --json must NOT request unsupported 'headRepository' field");
         });
 
         await runTest("Approves when CI run attempt (via supported CLI field 'attempt') matches context runAttempt", () => {

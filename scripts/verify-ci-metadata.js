@@ -86,6 +86,66 @@ function defaultGhClient({ command, args = [] }) {
 }
 
 /**
+ * Extracts repository 'owner/repo' from a canonical GitHub Actions run URL.
+ */
+function extractRepoFromRunUrl(runUrl) {
+    if (!runUrl || typeof runUrl !== "string") return null;
+    const match = runUrl.match(/^https?:\/\/[^\/]+\/([^\/]+\/[^\/]+)\/actions\/runs\/\d+/i)
+        || runUrl.match(/github\.com\/([^\/]+\/[^\/]+)\/actions\/runs/i);
+    return match ? match[1].trim() : null;
+}
+
+/**
+ * Extracts repository 'owner/repo' from a GitHub Pull Request URL.
+ */
+function extractRepoFromPrUrl(prUrl) {
+    if (!prUrl || typeof prUrl !== "string") return null;
+    const match = prUrl.match(/^https?:\/\/[^\/]+\/([^\/]+\/[^\/]+)\/pull\/\d+/i)
+        || prUrl.match(/github\.com\/([^\/]+\/[^\/]+)\/pull\/\d+/i);
+    return match ? match[1].trim() : null;
+}
+
+/**
+ * Resolves repository identity from run metadata using supported CLI fields and fallback properties.
+ */
+function resolveRunRepository(runMetadata) {
+    if (!runMetadata || typeof runMetadata !== "object") return null;
+    if (runMetadata.headRepository && runMetadata.headRepository.nameWithOwner) {
+        return runMetadata.headRepository.nameWithOwner.trim();
+    }
+    if (runMetadata.repository) {
+        if (typeof runMetadata.repository === "string") return runMetadata.repository.trim();
+        if (runMetadata.repository.full_name) return runMetadata.repository.full_name.trim();
+        if (runMetadata.repository.nameWithOwner) return runMetadata.repository.nameWithOwner.trim();
+    }
+    if (runMetadata.url) {
+        const fromUrl = extractRepoFromRunUrl(runMetadata.url);
+        if (fromUrl) return fromUrl;
+    }
+    return null;
+}
+
+/**
+ * Resolves repository identity from PR metadata using supported CLI fields and fallback properties.
+ */
+function resolvePrRepository(prMetadata) {
+    if (!prMetadata || typeof prMetadata !== "object") return null;
+    if (prMetadata.headRepository && prMetadata.headRepository.nameWithOwner) {
+        return prMetadata.headRepository.nameWithOwner.trim();
+    }
+    if (prMetadata.repository) {
+        if (typeof prMetadata.repository === "string") return prMetadata.repository.trim();
+        if (prMetadata.repository.full_name) return prMetadata.repository.full_name.trim();
+        if (prMetadata.repository.nameWithOwner) return prMetadata.repository.nameWithOwner.trim();
+    }
+    if (prMetadata.url) {
+        const fromUrl = extractRepoFromPrUrl(prMetadata.url);
+        if (fromUrl) return fromUrl;
+    }
+    return null;
+}
+
+/**
  * Verifies CI run metadata, PR integrity, and failure artifacts.
  */
 function verifyCiMetadata(options = {}) {
@@ -162,7 +222,7 @@ function verifyCiMetadata(options = {}) {
     try {
         runMetadata = apiClient({
             command: "run",
-            args: ["view", cleanRunId, "--json", "headSha,status,conclusion,event,databaseId,attempt,headRepository"]
+            args: ["view", cleanRunId, "--json", "headSha,status,conclusion,event,databaseId,attempt,url,headBranch"]
         });
     } catch (err) {
         return {
@@ -198,15 +258,15 @@ function verifyCiMetadata(options = {}) {
         };
     }
 
-    // Repository check against GitHub API run metadata
-    if (expectedRepo && runMetadata.headRepository && runMetadata.headRepository.nameWithOwner) {
+    // Repository check against GitHub API run metadata (using supported CLI url or fallback)
+    const runRepo = resolveRunRepository(runMetadata);
+    if (expectedRepo && runRepo) {
         const cleanExpectedRepo = expectedRepo.trim().toLowerCase();
-        const runRepo = runMetadata.headRepository.nameWithOwner.trim().toLowerCase();
-        if (runRepo !== cleanExpectedRepo) {
+        if (runRepo.toLowerCase() !== cleanExpectedRepo) {
             return {
                 valid: false,
                 error: "REPOSITORY_MISMATCH",
-                message: `CI run repository (${runMetadata.headRepository.nameWithOwner}) does not match expected repository (${expectedRepo}).`
+                message: `CI run repository (${runRepo}) does not match expected repository (${expectedRepo}).`
             };
         }
     }
@@ -273,7 +333,7 @@ function verifyCiMetadata(options = {}) {
         try {
             prMetadata = apiClient({
                 command: "pr",
-                args: ["view", cleanPrNumber, "--json", "headRefOid,headRefName,baseRefName,state"]
+                args: ["view", cleanPrNumber, "--json", "headRefOid,headRefName,baseRefName,state,headRepository,url"]
             });
         } catch (err) {
             return {
@@ -289,6 +349,19 @@ function verifyCiMetadata(options = {}) {
                 error: "PR_NOT_OPEN",
                 message: `PR #${cleanPrNumber} state is '${prMetadata.state}', expected 'OPEN'. Cannot repair closed or merged PRs.`
             };
+        }
+
+        // Verify PR repository matches expected repository
+        const prRepo = resolvePrRepository(prMetadata);
+        if (expectedRepo && prRepo) {
+            const cleanExpectedRepo = expectedRepo.trim().toLowerCase();
+            if (prRepo.toLowerCase() !== cleanExpectedRepo) {
+                return {
+                    valid: false,
+                    error: "REPOSITORY_MISMATCH",
+                    message: `PR #${cleanPrNumber} repository (${prRepo}) does not match expected repository (${expectedRepo}).`
+                };
+            }
         }
 
         const prHeadSha = (prMetadata.headRefOid || "").toLowerCase();
@@ -616,12 +689,14 @@ if (require.main === module) {
     const baseBranch = getArg("--base-branch") || process.env.BASE_BRANCH || "main";
     const contextPath = getArg("--context") || process.env.CONTEXT_PATH;
     const evidencePath = getArg("--evidence") || process.env.EVIDENCE_PATH;
+    const expectedRepo = getArg("--repo") || process.env.GITHUB_REPOSITORY;
 
     console.log("=== Verifying CI Run Metadata, PR Integrity & Artifact Lineage ===");
     console.log(`Run ID:        ${ciRunId}`);
     console.log(`Source Commit: ${sourceCommit}`);
     console.log(`PR Number:     ${prNumber || "N/A"}`);
     console.log(`Base Branch:   ${baseBranch}`);
+    console.log(`Repository:    ${expectedRepo || "N/A"}`);
     console.log(`Context:       ${contextPath}`);
     console.log(`Evidence:      ${evidencePath}\n`);
 
@@ -631,7 +706,8 @@ if (require.main === module) {
         prNumber,
         baseBranch,
         contextPath,
-        evidencePath
+        evidencePath,
+        expectedRepo
     });
 
     if (!result.valid) {
@@ -675,5 +751,9 @@ module.exports = {
     isValidGitRef,
     validateTargetPomPath,
     validateTestSpecPath,
-    verifyCiMetadata
+    verifyCiMetadata,
+    resolveRunRepository,
+    resolvePrRepository,
+    extractRepoFromRunUrl,
+    extractRepoFromPrUrl
 };
