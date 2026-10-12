@@ -12,6 +12,7 @@ const {
     extractRepoFromPrUrl
 } = require("./verify-ci-metadata");
 const {
+    resolveCandidatePatch,
     validatePatchAst,
     validateUnifiedDiff,
     checkSyntaxIntegrity,
@@ -1664,6 +1665,58 @@ async function runAll() {
             assert.strictEqual(isSuccess("success", "failure", "skipped", "failure"), false);
             assert.strictEqual(isSuccess("success", "success", "skipped", "failure"), false);
             assert.strictEqual(isSuccess("success", "success", "success", "failure"), false);
+        });
+
+        // Artifact layout & missing-patch resolution tests
+        await runTest("resolveCandidatePatch resolves valid flat layout with repair.patch and repair-summary.json", () => {
+            const flatDir = path.resolve(TEST_SANDBOX, "flat-artifact");
+            fs.mkdirSync(flatDir, { recursive: true });
+            fs.writeFileSync(path.resolve(flatDir, "repair.patch"), "--- a/pom.js\n+++ b/pom.js\n@@ -1 +1 @@\n-old\n+new\n", "utf8");
+            fs.writeFileSync(path.resolve(flatDir, "repair-summary.json"), JSON.stringify({ status: "GENERATED" }), "utf8");
+
+            const res = resolveCandidatePatch(flatDir);
+            assert.strictEqual(res.patchPath, path.resolve(flatDir, "repair.patch"));
+            assert.strictEqual(res.summaryPath, path.resolve(flatDir, "repair-summary.json"));
+            assert.ok(res.size > 0);
+        });
+
+        await runTest("resolveCandidatePatch normalizes nested candidate-output artifact layout to candidateDir root", () => {
+            const nestedDir = path.resolve(TEST_SANDBOX, "nested-artifact");
+            const subDir = path.resolve(nestedDir, "candidate-output");
+            fs.mkdirSync(subDir, { recursive: true });
+            fs.writeFileSync(path.resolve(subDir, "repair.patch"), "--- a/pom.js\n+++ b/pom.js\n@@ -1 +1 @@\n-old\n+new\n", "utf8");
+            fs.writeFileSync(path.resolve(subDir, "repair-summary.json"), JSON.stringify({ status: "GENERATED" }), "utf8");
+
+            const res = resolveCandidatePatch(nestedDir);
+            assert.strictEqual(res.patchPath, path.resolve(nestedDir, "repair.patch"));
+            assert.ok(fs.existsSync(path.resolve(nestedDir, "repair.patch")), "Patch must be normalized to root");
+            assert.ok(fs.existsSync(path.resolve(nestedDir, "repair-summary.json")), "Summary must be normalized to root");
+            assert.ok(res.size > 0);
+        });
+
+        await runTest("resolveCandidatePatch fails clearly when repair.patch is missing (PATCH_MISSING)", () => {
+            const missingDir = path.resolve(TEST_SANDBOX, "missing-artifact");
+            fs.mkdirSync(missingDir, { recursive: true });
+
+            assert.throws(() => {
+                resolveCandidatePatch(missingDir);
+            }, /Candidate patch missing: Expected patch file at/);
+        });
+
+        await runTest("resolveCandidatePatch fails clearly when repair.patch is empty (0 bytes) (PATCH_EMPTY)", () => {
+            const emptyDir = path.resolve(TEST_SANDBOX, "empty-artifact");
+            fs.mkdirSync(emptyDir, { recursive: true });
+            fs.writeFileSync(path.resolve(emptyDir, "repair.patch"), "", "utf8");
+
+            assert.throws(() => {
+                resolveCandidatePatch(emptyDir);
+            }, /Candidate patch is empty \(0 bytes\)/);
+        });
+
+        await runTest("resolveCandidatePatch fails clearly when candidate directory does not exist", () => {
+            assert.throws(() => {
+                resolveCandidatePatch(path.resolve(TEST_SANDBOX, "non-existent-candidate-dir"));
+            }, /Candidate directory does not exist/);
         });
 
         console.log(`\n============================================================`);

@@ -2038,6 +2038,60 @@ function writeSummary(data, targetSummaryPath = SUMMARY_PATH, targetRepairDir = 
     }
 }
 
+/**
+ * Resolves and validates candidate patch artifact layout.
+ * Ensures repair.patch exists, is non-empty, and normalizes nested directory layouts if present.
+ * Throws clear, descriptive errors if candidate directory or patch is missing or empty.
+ *
+ * @param {string} candidateDir - Path to candidate patch directory
+ * @returns {{ patchPath: string, summaryPath: string|null, size: number }}
+ */
+function resolveCandidatePatch(candidateDir) {
+    if (!candidateDir || typeof candidateDir !== "string") {
+        throw new Error("Candidate directory path must be a non-empty string.");
+    }
+    const absDir = path.resolve(candidateDir);
+    if (!fs.existsSync(absDir)) {
+        throw new Error(`Candidate directory does not exist: '${absDir}'.`);
+    }
+
+    const flatPatch = path.resolve(absDir, "repair.patch");
+    const flatSummary = path.resolve(absDir, "repair-summary.json");
+
+    if (!fs.existsSync(flatPatch)) {
+        // Inspect immediate subdirectories for nested artifact structure (e.g. candidate-output, candidate-patch)
+        const entries = fs.readdirSync(absDir, { withFileTypes: true });
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                const subPatch = path.resolve(absDir, entry.name, "repair.patch");
+                const subSummary = path.resolve(absDir, entry.name, "repair-summary.json");
+                if (fs.existsSync(subPatch)) {
+                    fs.copyFileSync(subPatch, flatPatch);
+                    if (fs.existsSync(subSummary) && !fs.existsSync(flatSummary)) {
+                        fs.copyFileSync(subSummary, flatSummary);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!fs.existsSync(flatPatch)) {
+        throw new Error(`Candidate patch missing: Expected patch file at '${flatPatch}'.`);
+    }
+
+    const stat = fs.statSync(flatPatch);
+    if (stat.size === 0) {
+        throw new Error(`Candidate patch is empty (0 bytes): '${flatPatch}'.`);
+    }
+
+    return {
+        patchPath: flatPatch,
+        summaryPath: fs.existsSync(flatSummary) ? flatSummary : null,
+        size: stat.size
+    };
+}
+
 if (require.main === module) {
     const args = process.argv.slice(2);
     const getArg = (flag) => {
@@ -2082,6 +2136,7 @@ if (require.main === module) {
 module.exports = {
     DEFAULT_MODEL,
     DEFAULT_FALLBACK_MODEL,
+    resolveCandidatePatch,
     isTransientError,
     sanitizeErrorMessage,
     validateContext,

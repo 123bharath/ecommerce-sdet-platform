@@ -126,8 +126,9 @@ jobs:
         run: |
           node -e '
             const fs = require("fs");
-            const { validatePatchAst } = require("./scripts/ai-repair-agent");
-            const patch = fs.readFileSync("candidate-output/repair.patch", "utf8");
+            const { validatePatchAst, resolveCandidatePatch } = require("./scripts/ai-repair-agent");
+            const res = resolveCandidatePatch("candidate-output");
+            const patch = fs.readFileSync(res.patchPath, "utf8");
             validatePatchAst(patch, process.env.TARGET_POM, process.env.SOURCE_COMMIT);
             console.log("Candidate patch syntax, structure, and target confinement verified.");
           '
@@ -137,7 +138,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ai-repair-candidate
-          path: candidate-output/
+          path: |
+            candidate-output/repair.patch
+            candidate-output/repair-summary.json
           retention-days: 7
 
       - name: Gate Repair Generation Outputs
@@ -198,13 +201,22 @@ jobs:
 
       - name: Create Isolated Worktree & Apply Patch
         id: apply-patch
+        env:
+          CANDIDATE_DIR: candidate-patch
         run: |
+          node -e '
+            const { resolveCandidatePatch } = require("./scripts/ai-repair-agent");
+            const res = resolveCandidatePatch(process.env.CANDIDATE_DIR);
+            console.log("Candidate patch verified (" + res.size + " bytes) at " + res.patchPath);
+          '
+
           echo "Setting up isolated worktree for patch validation..."
           git worktree add ../validation-workspace HEAD
           cd ../validation-workspace
 
-          git apply --check ../${{ github.workspace }}/candidate-patch/repair.patch
-          git apply ../${{ github.workspace }}/candidate-patch/repair.patch
+          PATCH_FILE="${GITHUB_WORKSPACE}/candidate-patch/repair.patch"
+          git apply --check "$PATCH_FILE"
+          git apply "$PATCH_FILE"
           echo "Patch applied cleanly in isolated worktree."
 
       - name: Start Services in Isolated Workspace
@@ -335,7 +347,8 @@ jobs:
         with:
           name: validated-ai-repair
           path: |
-            candidate-patch/
+            candidate-patch/repair.patch
+            candidate-patch/repair-summary.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -406,6 +419,12 @@ jobs:
           BASE_BRANCH: ${{ inputs.base_branch }}
           PR_NUMBER: ${{ needs.generate-repair.outputs.pr_number }}
         run: |
+          node -e '
+            const { resolveCandidatePatch } = require("./scripts/ai-repair-agent");
+            const res = resolveCandidatePatch("validated-patch");
+            console.log("Validated patch verified (" + res.size + " bytes) at " + res.patchPath);
+          '
+
           TARGET_BASE="${HEAD_BRANCH:-$BASE_BRANCH}"
           TARGET_BASENAME=$(basename "$TARGET_FILE" .js)
           SHORT_SHA=$(echo "$SOURCE_COMMIT" | cut -c1-7)

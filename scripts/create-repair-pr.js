@@ -136,6 +136,9 @@ function validatePrInputs(inputs = {}, rootDir = ROOT_DIR) {
     if (!fs.statSync(resolvedPatchPath).isFile()) {
         throw new Error(`Patch path is not a file: '${resolvedPatchPath}'.`);
     }
+    if (fs.statSync(resolvedPatchPath).size === 0) {
+        throw new Error(`Patch file is empty (0 bytes): '${resolvedPatchPath}'.`);
+    }
 
     // 6. Validate summaryPath
     if (!inputs.summaryPath || typeof inputs.summaryPath !== "string") {

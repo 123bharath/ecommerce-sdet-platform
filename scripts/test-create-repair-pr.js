@@ -170,6 +170,23 @@ async function runAll() {
             }, /Patch file does not exist/);
         });
 
+        await runTest("validatePrInputs rejects empty (0-byte) patch file", () => {
+            const emptyPatch = path.resolve(TEST_SANDBOX, "empty.patch");
+            const dummySummary = path.resolve(TEST_SANDBOX, "summary.json");
+            fs.writeFileSync(emptyPatch, "", "utf8");
+            fs.writeFileSync(dummySummary, JSON.stringify({ status: "VERIFIED" }), "utf8");
+
+            assert.throws(() => {
+                validatePrInputs({
+                    baseBranch: "main",
+                    repairBranch: "ai-repair/fix-catalog",
+                    sourceCommit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+                    patchPath: emptyPatch,
+                    summaryPath: dummySummary
+                });
+            }, /Patch file is empty \(0 bytes\)/);
+        });
+
         // =========================================================================
         // Suite 2: Command Execution Safety & Safeguards Tests
         // =========================================================================
