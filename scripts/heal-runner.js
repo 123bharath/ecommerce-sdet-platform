@@ -5,6 +5,17 @@ const path = require("path");
 const RESULTS_PATH = path.resolve(__dirname, "../test-results/results.json");
 const BACKUP_PATH = path.resolve(__dirname, "../test-results/results.json.bak");
 const CONTEXT_PATH = path.resolve(__dirname, "../test-results/healing-context.json");
+const ROOT_DIR = path.resolve(__dirname, "..");
+
+function getGitShaSafe() {
+    try {
+        const { execSync } = require("child_process");
+        return execSync("git rev-parse HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    } catch {
+        return null;
+    }
+}
+
 
 /**
  * Strips ANSI color codes from terminal error messages.
@@ -119,9 +130,37 @@ function collectFailedSpecs(suite, list = []) {
                             (att) => att.name === "trace" || (att.path && att.path.endsWith(".zip"))
                         );
 
+                        let targetPom = null;
+                        const stack = error.stack || rawMessage;
+                        const pomStackMatch = stack.match(/tests[/\\]pages[/\\]([a-zA-Z0-9_\-]+Page)\.js/);
+                        if (pomStackMatch) {
+                            targetPom = `tests/pages/${pomStackMatch[1]}.js`;
+                        } else if (spec.file) {
+                            let specAbs = path.isAbsolute(spec.file) ? spec.file : path.resolve(ROOT_DIR, spec.file);
+                            if (!fs.existsSync(specAbs)) {
+                                specAbs = path.resolve(ROOT_DIR, "tests", spec.file);
+                            }
+                            if (fs.existsSync(specAbs)) {
+                                try {
+                                    const specCode = fs.readFileSync(specAbs, "utf8");
+                                    const importMatch = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
+                                    if (importMatch) {
+                                        targetPom = `tests/pages/${importMatch[1]}.js`;
+                                    }
+                                } catch { /* ignore */ }
+                            }
+                        }
+
+                        let rawSpecPath = spec.file || error.location?.file || null;
+                        if (rawSpecPath && !rawSpecPath.replace(/\\/g, "/").startsWith("tests/") && !path.isAbsolute(rawSpecPath)) {
+                            rawSpecPath = `tests/${rawSpecPath}`;
+                        }
+                        const specFilePath = rawSpecPath ? rawSpecPath.replace(/\\/g, "/") : null;
                         list.push({
                             testTitle: spec.title || testItem.title || "Unknown Test",
-                            specFile: spec.file || error.location?.file || null,
+                            specFile: specFilePath,
+                            testFile: specFilePath,
+                            targetFile: targetPom,
                             lineNumber: error.location?.line || spec.line || null,
                             columnNumber: error.location?.column || spec.column || null,
                             observedSymptom: symptom,
@@ -167,8 +206,19 @@ function generateDiagnosticContext({ exitCode, errorType, diagnostic, rawError, 
         fs.mkdirSync(outputDir, { recursive: true });
     }
 
+    const testedCommit = process.env.TESTED_COMMIT_SHA || getGitShaSafe() || process.env.GITHUB_SHA;
+    const isPrEvent = process.env.EVENT_NAME === "pull_request" || process.env.GITHUB_EVENT_NAME === "pull_request" || Boolean(process.env.PR_HEAD_SHA);
+    const headSha = process.env.PR_HEAD_SHA || null;
+    const mergeSha = process.env.PR_MERGE_SHA || (isPrEvent ? testedCommit : null);
+
     const context = {
         timestamp: new Date().toISOString(),
+        commitSha: testedCommit,
+        headSha,
+        mergeSha,
+        runId: process.env.GITHUB_RUN_ID ? String(process.env.GITHUB_RUN_ID) : null,
+        runAttempt: process.env.GITHUB_RUN_ATTEMPT ? parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) : 1,
+        repository: process.env.GITHUB_REPOSITORY || null,
         status: "ERROR",
         isOrchestrationError: true,
         terminationType: terminationType || "ORCHESTRATOR_ERROR",
@@ -217,8 +267,38 @@ function generateHealingContext(exitCode, reportData, runStartTime) {
         (f) => !["LOCATOR_LOOKUP_TIMEOUT", "ASSERTION_MISMATCH", "ENVIRONMENT_CONNECTION_ERROR", "CODE_EXCEPTION"].includes(f.observedSymptom)
     );
 
+    const liveEvidencePath = path.resolve(__dirname, "../test-results/live-evidence.json");
+    let hasLiveEvidence = false;
+    if (fs.existsSync(liveEvidencePath)) {
+        try {
+            const parsedEvidence = JSON.parse(fs.readFileSync(liveEvidencePath, "utf8"));
+            if (failures.length > 0 && parsedEvidence.hasEvidence) {
+                failures[0].domSnapshot = parsedEvidence.domSnapshot;
+                failures[0].accessibilitySnapshot = parsedEvidence.accessibilitySnapshot;
+                failures[0].evidence = parsedEvidence;
+                hasLiveEvidence = true;
+            }
+        } catch {
+            // Ignore evidence read error
+        }
+    }
+
+    const commitSha = process.env.TESTED_COMMIT_SHA || getGitShaSafe() || process.env.GITHUB_SHA;
+    const isPrEvent = process.env.EVENT_NAME === "pull_request" || process.env.GITHUB_EVENT_NAME === "pull_request" || Boolean(process.env.PR_HEAD_SHA);
+    const headSha = process.env.PR_HEAD_SHA || null;
+    const mergeSha = process.env.PR_MERGE_SHA || (isPrEvent ? commitSha : null);
+    const runId = process.env.GITHUB_RUN_ID ? String(process.env.GITHUB_RUN_ID) : null;
+    const runAttempt = process.env.GITHUB_RUN_ATTEMPT ? parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) : 1;
+    const repository = process.env.GITHUB_REPOSITORY || null;
+
     const healingContext = {
         timestamp: new Date().toISOString(),
+        commitSha,
+        headSha,
+        mergeSha,
+        runId,
+        runAttempt,
+        repository,
         status: "FAILED",
         isOrchestrationError: false,
         terminationType: "NORMAL_EXIT",
@@ -234,13 +314,19 @@ function generateHealingContext(exitCode, reportData, runStartTime) {
                 otherFailures: otherFailures.length
             },
             hasLocatorTimeouts: locatorTimeouts.length > 0,
-            rootCauseStatus: "UNCONFIRMED - Requires Playwright MCP DOM/Network inspection per GEMINI.md"
+            hasBrowserEvidence: hasLiveEvidence,
+            rootCauseStatus: hasLiveEvidence
+                ? "EVIDENCE_ATTACHED - Browser DOM and accessibility snapshots captured headlessly"
+                : "UNCONFIRMED - Requires Playwright MCP DOM/Network inspection per GEMINI.md"
         },
         failures
     };
 
     fs.writeFileSync(CONTEXT_PATH, JSON.stringify(healingContext, null, 2), "utf8");
     console.log(`\n[Orchestrator] Failure context generated at: ${CONTEXT_PATH}`);
+    if (hasLiveEvidence) {
+        console.log(`[Orchestrator] Headless browser evidence attached to failure context.`);
+    }
     console.log(`[Orchestrator] Failures detected: ${failures.length} (Observed: ${locatorTimeouts.length} locator lookup timeouts, ${assertionMismatches.length} assertion mismatches, ${environmentErrors.length} environment errors)`);
     console.log(`[Orchestrator] Note: Root cause is unconfirmed. Multi-vector inspection is required.`);
 
@@ -271,10 +357,18 @@ function run() {
         }
     }
 
-    // 2. Clear any prior healing context
+    // 2. Clear any prior healing context and live evidence
     if (fs.existsSync(CONTEXT_PATH)) {
         try {
             fs.unlinkSync(CONTEXT_PATH);
+        } catch {
+            // Ignore
+        }
+    }
+    const priorEvidencePath = path.resolve(__dirname, "../test-results/live-evidence.json");
+    if (fs.existsSync(priorEvidencePath)) {
+        try {
+            fs.unlinkSync(priorEvidencePath);
         } catch {
             // Ignore
         }
