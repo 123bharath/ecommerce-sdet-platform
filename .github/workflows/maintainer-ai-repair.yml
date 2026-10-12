@@ -1,5 +1,4 @@
 name: Maintainer AI Test Repair & Validation
-
 on:
   workflow_dispatch:
     inputs:
@@ -30,11 +29,9 @@ on:
         required: false
         default: 'gemini-3.5-flash-lite'
         type: string
-
 permissions:
   contents: read
   actions: read
-
 jobs:
   generate-repair:
     name: "Generate Candidate Patch (Trusted ref: main)"
@@ -48,7 +45,6 @@ jobs:
       healed_locator: ${{ steps.generate.outputs.healed_locator }}
       pr_number: ${{ steps.verify-metadata.outputs.pr_number }}
       head_branch: ${{ steps.verify-metadata.outputs.head_branch }}
-
     steps:
       - name: Validate Source Commit SHA Format
         env:
@@ -58,23 +54,19 @@ jobs:
             echo "::error::Invalid source_commit: Must be a full 40-character hexadecimal SHA."
             exit 1
           fi
-
       - name: Checkout trusted default branch (main)
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
       - name: Install trusted dependencies from main
         run: npm ci
-
       - name: Download Failure Artifacts from CI Run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,7 +74,6 @@ jobs:
         run: |
           mkdir -p downloaded-artifacts
           gh run download "$CI_RUN_ID" --name playwright-healing-artifacts --dir downloaded-artifacts
-
       - name: Verify CI Run Metadata, PR Integrity & Artifact Lineage
         id: verify-metadata
         env:
@@ -95,7 +86,6 @@ jobs:
           EVIDENCE_PATH: downloaded-artifacts/test-results/live-evidence.json
         run: |
           node scripts/verify-ci-metadata.js
-
       - name: Generate AI Repair Patch with Gemini
         id: generate
         env:
@@ -117,7 +107,6 @@ jobs:
             --output-dir candidate-output \
             --model "$GEMINI_MODEL" \
             --fallback-model "$GEMINI_FALLBACK_MODEL"
-
       - name: Verify Candidate Patch Structure and Syntax
         if: steps.generate.outputs.can_heal == 'true'
         env:
@@ -132,7 +121,6 @@ jobs:
             validatePatchAst(patch, process.env.TARGET_POM, process.env.SOURCE_COMMIT);
             console.log("Candidate patch syntax, structure, and target confinement verified.");
           '
-
       - name: Upload Candidate Patch Artifact
         if: steps.generate.outputs.can_heal == 'true'
         uses: actions/upload-artifact@v4
@@ -142,13 +130,11 @@ jobs:
             candidate-output/repair.patch
             candidate-output/repair-summary.json
           retention-days: 7
-
       - name: Gate Repair Generation Outputs
         id: gate-outputs
         if: steps.generate.outputs.can_heal == 'true'
         run: |
           echo "can_heal=true" >> "$GITHUB_OUTPUT"
-
   validate-repair:
     name: Validate Repair (Secret-Free Isolated PR Environment)
     needs: generate-repair
@@ -157,10 +143,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       validation_passed: ${{ steps.gate-validation.outputs.validation_passed }}
-
     # ZERO SECRETS PERMITTED IN THIS JOB ENVIRONMENT
     env: {}
-
     services:
       mongodb:
         image: mongo:6
@@ -171,7 +155,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     steps:
       - name: Checkout repository at source_commit
         uses: actions/checkout@v4
@@ -179,46 +162,49 @@ jobs:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
           persist-credentials: false
-
       - name: Download Candidate Patch Artifact
         uses: actions/download-artifact@v4
         with:
           name: ai-repair-candidate
           path: candidate-patch
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
-      - name: Install dependencies in test environment
-        run: |
-          npm ci
-          npm ci --prefix backend
-          npm ci --prefix frontend
-          npx playwright install --with-deps chromium
-
       - name: Create Isolated Worktree & Apply Patch
         id: apply-patch
         env:
           CANDIDATE_DIR: candidate-patch
         run: |
           node -e '
-            const { resolveCandidatePatch } = require("./scripts/ai-repair-agent");
-            const res = resolveCandidatePatch(process.env.CANDIDATE_DIR);
-            console.log("Candidate patch verified (" + res.size + " bytes) at " + res.patchPath);
+            const fs = require("fs");
+            const path = require("path");
+            const dir = path.resolve(process.env.CANDIDATE_DIR);
+            const patch = path.join(dir, "repair.patch");
+            if (!fs.existsSync(patch)) {
+              throw new Error("Candidate patch missing: " + patch);
+            }
+            const stat = fs.statSync(patch);
+            if (!stat.isFile() || stat.size === 0) {
+              throw new Error("Candidate patch is not a non-empty file.");
+            }
+            console.log("Candidate patch verified (" + stat.size + " bytes).");
           '
-
           echo "Setting up isolated worktree for patch validation..."
           git worktree add ../validation-workspace HEAD
           cd ../validation-workspace
-
           PATCH_FILE="${GITHUB_WORKSPACE}/candidate-patch/repair.patch"
           git apply --check "$PATCH_FILE"
           git apply "$PATCH_FILE"
           echo "Patch applied cleanly in isolated worktree."
-
+      - name: Install dependencies in isolated workspace
+        run: |
+          cd ../validation-workspace
+          npm ci
+          npm ci --prefix backend
+          npm ci --prefix frontend
+          npx playwright install --with-deps chromium
       - name: Start Services in Isolated Workspace
         run: |
           cd ../validation-workspace
@@ -231,41 +217,36 @@ jobs:
           PORT: 4000
           MONGODB_URI: mongodb://localhost:27017/ecommerce_sdet
           API_BASE_URL: http://localhost:4000
-
       - name: Tier 1 - Execute Primary Failed UI Test Spec
         id: tier1
         env:
           TEST_FILE: ${{ needs.generate-repair.outputs.test_file }}
         run: |
           cd ../validation-workspace
-          if [[ "$TEST_FILE" =~ \.\. ]] || ! [[ "$TEST_FILE" =~ ^tests/ui/[a-zA-Z0-9_-]+\.spec\.(js|ts)$ ]]; then
+          if [[ "$TEST_FILE" =~ \.\. ]] || ! [[ "$TEST_FILE" =~ ^tests/ui/[a-zA-Z0-9\_-]+\.spec\.(js|ts)$ ]]; then
             echo "::error::Invalid test file spec path: Must reside under tests/ui/*.spec.(js|ts). Received: $TEST_FILE"
             exit 1
           fi
           echo "Executing primary failing UI test spec: $TEST_FILE"
           npx playwright test "$TEST_FILE" --project=ui
-
       - name: Tier 2 - Execute Full UI Regression Suite
         id: tier2
         run: |
           cd ../validation-workspace
           echo "Executing full UI regression suite to confirm zero regressions..."
           npx playwright test --project=ui
-
       - name: Tier 3 - Execute Full API Regression Suite
         id: tier3
         run: |
           cd ../validation-workspace
           echo "Executing full API regression suite..."
           npx playwright test --project=api
-
       - name: Clean up Isolated Worktree
         if: always()
         run: |
           pkill -f "npm start --prefix backend" 2>/dev/null || true
           pkill -f "npm run dev --prefix frontend" 2>/dev/null || true
           git worktree remove --force ../validation-workspace 2>/dev/null || true
-
       - name: Generate Validation Report & Step Summary
         if: always()
         env:
@@ -286,14 +267,12 @@ jobs:
             const jobSuccess = process.env.JOB_STATUS === "success";
             const isSuccess = t1 && t2 && t3 && jobSuccess;
             const badge = isSuccess ? "🟢 VALIDATED REPAIR CANDIDATE AVAILABLE" : "🔴 VALIDATION FAILED";
-
             const formatTier = (status) => {
               if (status === "success") return "✅ PASSED";
               if (status === "failure") return "❌ FAILED";
               if (status === "cancelled") return "⏹️ CANCELLED";
               return "⚠️ " + (status || "SKIPPED").toUpperCase();
             };
-
             const lines = [
               `## 🤖 Antigravity AI Repair Validation Report`,
               "",
@@ -317,13 +296,11 @@ jobs:
               "git apply repair.patch",
               "```"
             ];
-
             const summaryFile = process.env.GITHUB_STEP_SUMMARY;
             if (summaryFile) {
               fs.appendFileSync(summaryFile, lines.join("\n") + "\n", "utf8");
             }
           '
-
       - name: Gate Validation Outputs
         id: gate-validation
         if: steps.tier1.outcome == 'success' && steps.tier2.outcome == 'success' && steps.tier3.outcome == 'success'
@@ -340,7 +317,6 @@ jobs:
               console.log("Updated repair-summary.json status to VERIFIED.");
             }
           '
-
       - name: Upload Validated Repair Artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -351,44 +327,36 @@ jobs:
             candidate-patch/repair-summary.json
           if-no-files-found: ignore
           retention-days: 14
-
   publish-repair:
     name: "Publish Repair Proposal (Draft PR & Isolated Branch)"
     needs: [generate-repair, validate-repair]
     if: needs.generate-repair.outputs.can_heal == 'true' && needs.validate-repair.result == 'success' && needs.validate-repair.outputs.validation_passed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     permissions:
       contents: write
       pull-requests: write
-
     # ZERO SECRETS PERMITTED - GEMINI_API_KEY IS NOT EXPOSED
     env:
       GH_TOKEN: ${{ github.token }}
-
     steps:
       - name: Checkout trusted default branch (main)
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
       - name: Install trusted dependencies
         run: npm ci
-
       - name: Download Validated Repair Artifacts
         uses: actions/download-artifact@v4
         with:
           name: validated-ai-repair
           path: validated-patch
-
       - name: Re-Verify PR Head SHA (Reject Stale Candidates)
         id: reverify-head
         env:
@@ -409,7 +377,6 @@ jobs:
             fi
             echo "✓ PR #$PR_NUMBER head remains unchanged at $SOURCE_COMMIT."
           fi
-
       - name: Create Isolated Repair Branch & Draft PR
         id: create-pr
         env:
@@ -420,30 +387,34 @@ jobs:
           PR_NUMBER: ${{ needs.generate-repair.outputs.pr_number }}
         run: |
           node -e '
-            const { resolveCandidatePatch } = require("./scripts/ai-repair-agent");
-            const res = resolveCandidatePatch("validated-patch");
-            console.log("Validated patch verified (" + res.size + " bytes) at " + res.patchPath);
+            const fs = require("fs");
+            const path = require("path");
+            const patchPath = path.resolve("validated-patch/repair.patch");
+            if (!fs.existsSync(patchPath) || !fs.statSync(patchPath).isFile()) {
+              throw new Error("Validated repair.patch artifact is missing.");
+            }
+            const size = fs.statSync(patchPath).size;
+            if (size === 0) throw new Error("Validated repair.patch artifact is empty.");
+            if (!fs.existsSync("validated-patch/repair-summary.json")) {
+              throw new Error("Validated repair summary artifact is missing.");
+            }
+            console.log("Validated patch verified (" + size + " bytes) at " + patchPath);
           '
-
           TARGET_BASE="${HEAD_BRANCH:-$BASE_BRANCH}"
           TARGET_BASENAME=$(basename "$TARGET_FILE" .js)
           SHORT_SHA=$(echo "$SOURCE_COMMIT" | cut -c1-7)
           REPAIR_BRANCH="ai-repair/heal-${TARGET_BASENAME}-${SHORT_SHA}"
-
           echo "Target Base Branch: $TARGET_BASE"
           echo "Repair Branch:      $REPAIR_BRANCH"
-
           # Configure Git user for the automated repair commit
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           node scripts/create-repair-pr.js \
             --repair-branch "$REPAIR_BRANCH" \
             --base-branch "$TARGET_BASE" \
             --source-commit "$SOURCE_COMMIT" \
             --patch validated-patch/repair.patch \
             --summary validated-patch/repair-summary.json
-
       - name: Generate Publishing Summary
         if: always()
         env:
@@ -466,4 +437,3 @@ jobs:
           else
             echo "❌ **Failed to publish repair branch or draft PR.** Check job logs for details." >> "$GITHUB_STEP_SUMMARY"
           fi
-
