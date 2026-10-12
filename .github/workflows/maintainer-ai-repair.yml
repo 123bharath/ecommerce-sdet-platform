@@ -25,6 +25,11 @@ on:
         required: true
         default: 'gemini-3.5-flash'
         type: string
+      gemini_fallback_model:
+        description: 'Fallback Gemini model to use if primary model encounters transient errors'
+        required: false
+        default: 'gemini-3.5-flash-lite'
+        type: string
 
 permissions:
   contents: read
@@ -96,6 +101,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ inputs.gemini_model }}
+          GEMINI_FALLBACK_MODEL: ${{ inputs.gemini_fallback_model }}
           SOURCE_COMMIT: ${{ steps.verify-metadata.outputs.source_commit }}
           TARGET_POM: ${{ steps.verify-metadata.outputs.target_file }}
           CONTEXT_PATH: downloaded-artifacts/test-results/healing-context.json
@@ -109,7 +115,8 @@ jobs:
             --source-commit "$SOURCE_COMMIT" \
             --target-pom "$TARGET_POM" \
             --output-dir candidate-output \
-            --model "$GEMINI_MODEL"
+            --model "$GEMINI_MODEL" \
+            --fallback-model "$GEMINI_FALLBACK_MODEL"
 
       - name: Verify Candidate Patch Structure and Syntax
         if: steps.generate.outputs.can_heal == 'true'

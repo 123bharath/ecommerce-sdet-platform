@@ -16,8 +16,9 @@ const GEMINI_MD_PATH = path.resolve(ROOT_DIR, "GEMINI.md");
 // Security whitelist: ONLY Page Object Model files inside tests/pages/ may be targeted
 const APPROVED_TARGET_DIR = path.resolve(ROOT_DIR, "tests/pages");
 
-// Model configuration: Documented default model is gemini-3.8-flash, configurable via GEMINI_MODEL env var
-const DEFAULT_MODEL = "gemini-3.8-flash";
+// Model configuration: Primary model defaults to gemini-3.5-flash, fallback to gemini-3.5-flash-lite
+const DEFAULT_MODEL = "gemini-3.5-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 
 /**
  * Validates test-results/healing-context.json.
@@ -1184,75 +1185,183 @@ function sanitizeJsonResponse(rawText) {
 }
 
 /**
+ * Redacts API keys and sensitive tokens from error messages and logs.
+ */
+function sanitizeErrorMessage(msg, apiKey = null) {
+    if (!msg) return "";
+    let str = typeof msg === "string" ? msg : String(msg?.message || msg);
+    if (apiKey && typeof apiKey === "string" && apiKey.length > 5) {
+        str = str.split(apiKey).join("[REDACTED_API_KEY]");
+    }
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5) {
+        str = str.split(process.env.GEMINI_API_KEY).join("[REDACTED_API_KEY]");
+    }
+    str = str.replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]");
+    str = str.replace(/([?&]key=)[^&\s"']+/gi, "$1[REDACTED_API_KEY]");
+    return str;
+}
+
+/**
+ * Classifies an error as transient (eligible for retry and model fallback)
+ * or permanent (fail immediately without retry).
+ */
+function isTransientError(err) {
+    if (!err) return false;
+    const msg = typeof err === "string" ? err : (err.message || String(err));
+    const status = err.status || err.statusCode || err.code;
+
+    // Definite permanent HTTP statuses
+    if (status === 400 || status === 401 || status === 403) {
+        return false;
+    }
+
+    // Permanent error patterns in message
+    if (/401|403|unauthorized|forbidden|unauthenticated|permission_denied|api_key_invalid|invalid_api_key|api key not valid|missing_api_key|invalid_argument|malformed_request|bad request/i.test(msg)) {
+        return false;
+    }
+
+    // Check transient status codes
+    if ([429, 500, 502, 503, 504].includes(Number(status))) {
+        return true;
+    }
+
+    // Check transient error patterns in message or code
+    if (/503|429|500|502|504|UNAVAILABLE|RESOURCE_EXHAUSTED|RATE_LIMIT|rate limit|quota|high demand|overloaded|timeout|timed out|AbortError|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network error|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(msg)) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * Invokes Gemini model or test mock to produce repair proposal.
  * Priority: options.model -> process.env.GEMINI_MODEL -> DEFAULT_MODEL.
+ * Handles transient errors with bounded exponential backoff and cascades to fallback model
+ * only after primary model retries are exhausted.
+ * Permanent errors (e.g. invalid API key, 400 Bad Request) fail immediately without retrying or fallback.
  */
-async function invokeModel({ prompt, apiKey, modelClient, model, timeoutMs = 60000 }) {
-    const selectedModel = model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+async function invokeModel({
+    prompt,
+    apiKey,
+    modelClient,
+    model,
+    fallbackModel,
+    timeoutMs = 60000,
+    maxAttemptsPerModel = 3,
+    baseDelayMs = 1000,
+    maxDelayMs = 10000
+}) {
+    const primaryModel = model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+    const resolvedFallbackModel = fallbackModel !== undefined
+        ? fallbackModel
+        : (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL);
 
-    if (modelClient) {
-        return await modelClient.generateContent({ prompt, model: selectedModel });
+    const modelsToTry = [primaryModel];
+    if (resolvedFallbackModel && resolvedFallbackModel !== primaryModel) {
+        modelsToTry.push(resolvedFallbackModel);
     }
 
     const resolvedApiKey = apiKey || process.env.GEMINI_API_KEY;
-    if (!resolvedApiKey) {
+    if (!modelClient && !resolvedApiKey) {
         throw new Error("MISSING_API_KEY: GEMINI_API_KEY environment variable is required.");
     }
 
-    const { GoogleGenAI } = await import("@google/genai");
-    const ai = new GoogleGenAI({ apiKey: resolvedApiKey });
-
     let lastError = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-        try {
-            const response = await ai.models.generateContent({
-                model: selectedModel,
-                contents: prompt,
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: "OBJECT",
-                        properties: {
-                            canHeal: { type: "BOOLEAN", description: "Whether failure is a stale locator that can be healed" },
-                            rootCause: { type: "STRING", enum: ["STALE_LOCATOR", "APPLICATION_DEFECT", "TEST_DATA_ISSUE", "ENVIRONMENT_ISSUE"] },
-                            diagnosis: { type: "STRING", description: "Explanation grounded in evidence" },
-                            evidenceObserved: { type: "STRING", description: "Observed DOM or accessibility evidence" },
-                            targetFile: { type: "STRING", description: "Exact relative path of POM file, e.g. tests/pages/ProductListPage.js" },
-                            originalLocator: { type: "STRING", description: "Previous selector to replace" },
-                            healedLocator: { type: "STRING", description: "New accessible Playwright locator" },
-                            patchedFileContent: { type: "STRING", description: "Complete updated source code of target POM file" }
-                        },
-                        required: ["canHeal", "rootCause", "diagnosis", "targetFile", "originalLocator", "healedLocator", "patchedFileContent"]
-                    },
-                    temperature: 0.1,
-                    maxOutputTokens: 8192
+    for (let modelIndex = 0; modelIndex < modelsToTry.length; modelIndex++) {
+        const currentModel = modelsToTry[modelIndex];
+        const isFallback = modelIndex > 0;
+
+        if (isFallback) {
+            console.warn(`[AI Repair Agent] Primary model (${modelsToTry[0]}) retries exhausted. Cascading to fallback model: ${currentModel}...`);
+        }
+
+        for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+            try {
+                let parsed;
+                if (modelClient) {
+                    const clientRes = await modelClient.generateContent({ prompt, model: currentModel });
+                    if (!clientRes) {
+                        throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
+                    }
+                    parsed = clientRes;
+                } else {
+                    const { GoogleGenAI } = await import("@google/genai");
+                    const ai = new GoogleGenAI({ apiKey: resolvedApiKey });
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+                    try {
+                        const response = await ai.models.generateContent({
+                            model: currentModel,
+                            contents: prompt,
+                            config: {
+                                responseMimeType: "application/json",
+                                responseSchema: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        canHeal: { type: "BOOLEAN", description: "Whether failure is a stale locator that can be healed" },
+                                        rootCause: { type: "STRING", enum: ["STALE_LOCATOR", "APPLICATION_DEFECT", "TEST_DATA_ISSUE", "ENVIRONMENT_ISSUE"] },
+                                        diagnosis: { type: "STRING", description: "Explanation grounded in evidence" },
+                                        evidenceObserved: { type: "STRING", description: "Observed DOM or accessibility evidence" },
+                                        targetFile: { type: "STRING", description: "Exact relative path of POM file, e.g. tests/pages/ProductListPage.js" },
+                                        originalLocator: { type: "STRING", description: "Previous selector to replace" },
+                                        healedLocator: { type: "STRING", description: "New accessible Playwright locator" },
+                                        patchedFileContent: { type: "STRING", description: "Complete updated source code of target POM file" }
+                                    },
+                                    required: ["canHeal", "rootCause", "diagnosis", "targetFile", "originalLocator", "healedLocator", "patchedFileContent"]
+                                },
+                                temperature: 0.1,
+                                maxOutputTokens: 8192
+                            }
+                        });
+                        clearTimeout(timer);
+
+                        const text = response.text || (response.candidates && response.candidates[0]?.content?.parts[0]?.text);
+                        if (!text) {
+                            throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
+                        }
+
+                        const sanitized = sanitizeJsonResponse(text);
+                        parsed = JSON.parse(sanitized);
+                    } catch (callErr) {
+                        clearTimeout(timer);
+                        throw callErr;
+                    }
                 }
-            });
-            clearTimeout(timer);
 
-            const text = response.text || (response.candidates && response.candidates[0]?.content?.parts[0]?.text);
-            if (!text) {
-                throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
-            }
+                if (parsed && typeof parsed === "object") {
+                    parsed._modelUsed = currentModel;
+                }
+                return parsed;
+            } catch (err) {
+                const sanitizedErrMsg = sanitizeErrorMessage(err.message, resolvedApiKey);
+                lastError = new Error(sanitizedErrMsg);
+                if (err.status) lastError.status = err.status;
+                if (err.statusCode) lastError.statusCode = err.statusCode;
+                if (err.code) lastError.code = err.code;
 
-            const sanitized = sanitizeJsonResponse(text);
-            return JSON.parse(sanitized);
-        } catch (err) {
-            clearTimeout(timer);
-            lastError = err;
-            const isTransient = /503|UNAVAILABLE|high demand|overloaded/i.test(err.message);
-            if (isTransient && attempt < 3) {
-                const delayMs = attempt * 3000;
-                console.warn(`[AI Repair Agent] Transient model spike (attempt ${attempt}/3). Retrying in ${delayMs / 1000}s...`);
-                await new Promise((r) => setTimeout(r, delayMs));
-                continue;
+                // Permanent error: Do NOT retry and do NOT fall back
+                if (!isTransientError(err)) {
+                    console.error(`[AI Repair Agent] Permanent error with ${currentModel}: ${sanitizedErrMsg}. Aborting without retry or fallback.`);
+                    throw lastError;
+                }
+
+                // Transient error: Retry if attempts remaining
+                if (attempt < maxAttemptsPerModel) {
+                    const delayMs = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+                    console.warn(`[AI Repair Agent] Transient error with ${currentModel} (attempt ${attempt}/${maxAttemptsPerModel}): ${sanitizedErrMsg}. Retrying in ${delayMs}ms...`);
+                    if (delayMs > 0) {
+                        await new Promise((r) => setTimeout(r, delayMs));
+                    }
+                } else {
+                    console.warn(`[AI Repair Agent] Transient error attempts exhausted (${maxAttemptsPerModel}/${maxAttemptsPerModel}) for model ${currentModel}: ${sanitizedErrMsg}`);
+                    break;
+                }
             }
-            throw err;
         }
     }
+
     throw lastError;
 }
 
@@ -1282,9 +1391,15 @@ async function runRepairAgent(options = {}) {
     const apiKey = options.apiKey || process.env.GEMINI_API_KEY;
     const targetPomRel = options.targetPomRel || "tests/pages/ProductListPage.js";
     const selectedModel = options.model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+    const fallbackModel = options.fallbackModel !== undefined
+        ? options.fallbackModel
+        : (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL);
 
     console.log("=== Antigravity Programmatic AI Repair Agent (Phase 1) ===\n");
     console.log(`[AI Repair Agent] Configured model: ${selectedModel}`);
+    if (fallbackModel && fallbackModel !== selectedModel) {
+        console.log(`[AI Repair Agent] Configured fallback model: ${fallbackModel}`);
+    }
 
     const recordSummary = (data) => writeSummary(data, summaryPath, repairDir);
 
@@ -1420,18 +1535,30 @@ async function runRepairAgent(options = {}) {
     console.log(`[AI Repair Agent] Investigating failure: "${failure.testTitle}"...`);
     let modelResponse;
     try {
-        modelResponse = await invokeModel({ prompt, apiKey, modelClient, model: selectedModel });
+        modelResponse = await invokeModel({
+            prompt,
+            apiKey,
+            modelClient,
+            model: selectedModel,
+            fallbackModel,
+            baseDelayMs: options.baseDelayMs,
+            maxAttemptsPerModel: options.maxAttemptsPerModel,
+            timeoutMs: options.timeoutMs
+        });
     } catch (err) {
-        console.error(`[AI Repair Agent] Model invocation failed: ${err.message}`);
-        const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: err.message, model: selectedModel };
+        const sanitizedErrMsg = sanitizeErrorMessage(err.message, apiKey);
+        console.error(`[AI Repair Agent] Model invocation failed: ${sanitizedErrMsg}`);
+        const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: sanitizedErrMsg, model: selectedModel };
         recordSummary(result);
         return result;
     }
 
+    const actualModelUsed = modelResponse?._modelUsed || selectedModel;
+
     // 7. Process model response
     if (!modelResponse || typeof modelResponse !== "object") {
         console.error("[AI Repair Agent] Model returned malformed response object.");
-        const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT" };
+        const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT", model: actualModelUsed };
         recordSummary(result);
         return result;
     }
@@ -1441,6 +1568,7 @@ async function runRepairAgent(options = {}) {
         console.log(`[AI Repair Agent] Diagnosis: ${modelResponse.diagnosis}`);
         const result = {
             status: "ABSTAINED",
+            model: actualModelUsed,
             rootCause: modelResponse.rootCause,
             reason: modelResponse.canHeal ? "NOT_STALE_LOCATOR" : "INSUFFICIENT_EVIDENCE_OR_DEFECT",
             diagnosis: modelResponse.diagnosis,
@@ -1476,6 +1604,7 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
+            model: actualModelUsed,
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1490,6 +1619,7 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "ABSTAINED",
             reason: "GROUNDING_VIOLATION",
+            model: actualModelUsed,
             message: groundingCheck.reason,
             targetFile: modelResponse.targetFile
         };
@@ -1507,6 +1637,7 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
+            model: actualModelUsed,
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1526,7 +1657,7 @@ async function runRepairAgent(options = {}) {
         const generatedResult = {
             status: "GENERATED",
             canHeal: true,
-            model: selectedModel,
+            model: actualModelUsed,
             rootCause: modelResponse.rootCause,
             diagnosis: modelResponse.diagnosis,
             targetFile: modelResponse.targetFile,
@@ -1558,7 +1689,7 @@ async function runRepairAgent(options = {}) {
                 const failureResult = {
                     status: "VALIDATION_FAILED",
                     reason: "TEST_VERIFICATION_FAILED",
-                    model: selectedModel,
+                    model: actualModelUsed,
                     rootCause: modelResponse.rootCause,
                     diagnosis: modelResponse.diagnosis,
                     targetFile: modelResponse.targetFile,
@@ -1575,7 +1706,7 @@ async function runRepairAgent(options = {}) {
             console.log(`[AI Repair Agent] Isolated candidate verification passed! Repair verified.`);
             const verifiedResult = {
                 status: "VERIFIED",
-                model: selectedModel,
+                model: actualModelUsed,
                 rootCause: modelResponse.rootCause,
                 diagnosis: modelResponse.diagnosis,
                 targetFile: modelResponse.targetFile,
@@ -1591,7 +1722,7 @@ async function runRepairAgent(options = {}) {
             const errorResult = {
                 status: "VALIDATION_FAILED",
                 reason: "ISOLATION_ERROR",
-                model: selectedModel,
+                model: actualModelUsed,
                 message: err.message,
                 patchPath: patchPath
             };
@@ -1602,7 +1733,7 @@ async function runRepairAgent(options = {}) {
 
     const summaryResult = {
         status: "PROPOSED",
-        model: selectedModel,
+        model: actualModelUsed,
         rootCause: modelResponse.rootCause,
         diagnosis: modelResponse.diagnosis,
         targetFile: modelResponse.targetFile,
@@ -1918,6 +2049,7 @@ if (require.main === module) {
     const generateOnly = args.includes("--generate-only");
     const isolationMode = args.includes("--worktree") ? "worktree" : "directory";
     const model = getArg("--model");
+    const fallbackModel = getArg("--fallback-model");
     const evidencePath = getArg("--evidence");
     const requireEvidence = args.includes("--require-evidence") || Boolean(evidencePath);
     const contextPath = getArg("--context");
@@ -1931,6 +2063,7 @@ if (require.main === module) {
         generateOnly,
         isolationMode,
         model,
+        fallbackModel,
         evidencePath,
         requireEvidence,
         sourceCommit,
@@ -1948,6 +2081,9 @@ if (require.main === module) {
 
 module.exports = {
     DEFAULT_MODEL,
+    DEFAULT_FALLBACK_MODEL,
+    isTransientError,
+    sanitizeErrorMessage,
     validateContext,
     classifyPreFilter,
     validateTargetFile,

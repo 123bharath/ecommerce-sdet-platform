@@ -313,7 +313,7 @@ function generatePrBody(summary, patchDiff) {
     const originalLocator = summary.originalLocator || "N/A";
     const healedLocator = summary.healedLocator || "N/A";
     const diagnosis = summary.diagnosis || "Stale locator detected and healed.";
-    const model = summary.model || "gemini-3.8-flash";
+    const model = summary.model || "gemini-3.5-flash";
     const validationExcerpt = summary.validationOutput
         ? summary.validationOutput.slice(0, 1000)
         : "Isolated Playwright test suite passed cleanly.";
@@ -364,7 +364,7 @@ function generateCommitMessage(summary, targetFile) {
         `- Target File: ${targetFile}`,
         `- Original Locator: ${summary.originalLocator || "N/A"}`,
         `- Healed Locator: ${summary.healedLocator || "N/A"}`,
-        `- Model: ${summary.model || "gemini-3.8-flash"}`,
+        `- Model: ${summary.model || "gemini-3.5-flash"}`,
         "- Verified: Tested in isolated workspace with passing test and regression assertions.",
         "- Human Review Required: Auto-merge is strictly prohibited."
     ].join("\n");

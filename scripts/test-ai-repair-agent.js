@@ -3,6 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const {
     DEFAULT_MODEL,
+    DEFAULT_FALLBACK_MODEL,
+    isTransientError,
+    sanitizeErrorMessage,
     validateContext,
     classifyPreFilter,
     validateTargetFile,
@@ -1191,12 +1194,47 @@ async function runAll() {
         });
 
         // --------------------------------------------------------------------------
-        // SUITE 10: Model Configuration & Selection Tests (DEFAULT_MODEL, GEMINI_MODEL, options.model)
+        // SUITE 10: Model Configuration, Transient Retry, Fallback & Security Tests
         // --------------------------------------------------------------------------
-        console.log("\n[Suite 10] Model Configuration & Dynamic Selection Tests");
+        console.log("\n[Suite 10] Model Configuration, Transient Retry, Fallback & Security Tests");
 
-        runTest("DEFAULT_MODEL constant is exported and defaults to gemini-3.8-flash", () => {
-            assert.strictEqual(DEFAULT_MODEL, "gemini-3.8-flash");
+        runTest("DEFAULT_MODEL and DEFAULT_FALLBACK_MODEL constants are exported with correct defaults", () => {
+            assert.strictEqual(DEFAULT_MODEL, "gemini-3.5-flash");
+            assert.strictEqual(DEFAULT_FALLBACK_MODEL, "gemini-3.5-flash-lite");
+        });
+
+        runTest("sanitizeErrorMessage scrubs explicit keys, env keys, AIza patterns, and key query params", () => {
+            const secretKey = "AIzaSyTestSecretKey1234567890abcdef";
+            const raw1 = `Error calling API with key ${secretKey}: 401 Unauthorized`;
+            const sanitized1 = sanitizeErrorMessage(raw1, secretKey);
+            assert.ok(!sanitized1.includes(secretKey), "Explicit API key must be redacted");
+            assert.ok(sanitized1.includes("[REDACTED_API_KEY]"));
+
+            const raw2 = "https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyDifferentSecretToken99999";
+            const sanitized2 = sanitizeErrorMessage(raw2);
+            assert.ok(!sanitized2.includes("AIzaSyDifferentSecretToken99999"), "AIza pattern must be redacted");
+            assert.ok(sanitized2.includes("[REDACTED_API_KEY]"));
+        });
+
+        runTest("isTransientError distinguishes transient from permanent errors", () => {
+            // Permanent errors (must NOT retry)
+            assert.strictEqual(isTransientError({ status: 400, message: "400 Bad Request" }), false);
+            assert.strictEqual(isTransientError({ status: 401, message: "401 Unauthorized" }), false);
+            assert.strictEqual(isTransientError({ status: 403, message: "403 Forbidden" }), false);
+            assert.strictEqual(isTransientError(new Error("API_KEY_INVALID: API key not valid")), false);
+            assert.strictEqual(isTransientError(new Error("MISSING_API_KEY: key required")), false);
+            assert.strictEqual(isTransientError(new Error("InvalidArgument: malformed_request payload")), false);
+
+            // Transient errors (must retry)
+            assert.strictEqual(isTransientError({ status: 503, message: "Service Unavailable" }), true);
+            assert.strictEqual(isTransientError({ status: 429, message: "Too Many Requests" }), true);
+            assert.strictEqual(isTransientError({ status: 500, message: "Internal Server Error" }), true);
+            assert.strictEqual(isTransientError({ status: 502, message: "Bad Gateway" }), true);
+            assert.strictEqual(isTransientError({ status: 504, message: "Gateway Timeout" }), true);
+            assert.strictEqual(isTransientError(new Error("503 The model is overloaded. Please try again.")), true);
+            assert.strictEqual(isTransientError(new Error("429 RESOURCE_EXHAUSTED: quota exceeded")), true);
+            assert.strictEqual(isTransientError(new Error("The operation was aborted due to timeout")), true);
+            assert.strictEqual(isTransientError(new Error("read ECONNRESET")), true);
         });
 
         await runAsyncTest("invokeModel resolves DEFAULT_MODEL when no model or GEMINI_MODEL is set", async () => {
@@ -1212,7 +1250,7 @@ async function runAll() {
             delete process.env.GEMINI_MODEL;
             try {
                 await invokeModel({ prompt: "test prompt", modelClient: mockClient });
-                assert.strictEqual(capturedModel, "gemini-3.8-flash");
+                assert.strictEqual(capturedModel, "gemini-3.5-flash");
             } finally {
                 if (savedEnv !== undefined) process.env.GEMINI_MODEL = savedEnv;
             }
@@ -1258,6 +1296,190 @@ async function runAll() {
             }
         });
 
+        await runAsyncTest("invokeModel primary success on first attempt without retrying", async () => {
+            let callCount = 0;
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    callCount++;
+                    return { canHeal: true, rootCause: "STALE_LOCATOR", diagnosis: "Success on first try" };
+                }
+            };
+
+            const result = await invokeModel({
+                prompt: "test prompt",
+                modelClient: mockClient,
+                model: "gemini-3.5-flash",
+                fallbackModel: "gemini-3.5-flash-lite",
+                baseDelayMs: 0
+            });
+
+            assert.strictEqual(callCount, 1, "Must succeed on first attempt");
+            assert.strictEqual(result._modelUsed, "gemini-3.5-flash");
+            assert.strictEqual(result.canHeal, true);
+        });
+
+        await runAsyncTest("invokeModel retries transient error on primary model with backoff and succeeds", async () => {
+            let attempts = 0;
+            const modelsCalled = [];
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    attempts++;
+                    modelsCalled.push(model);
+                    if (attempts === 1) {
+                        const err = new Error("503 The model is overloaded. Please try again later.");
+                        err.status = 503;
+                        throw err;
+                    }
+                    return { canHeal: true, rootCause: "STALE_LOCATOR", diagnosis: "Recovered on attempt 2" };
+                }
+            };
+
+            const result = await invokeModel({
+                prompt: "test prompt",
+                modelClient: mockClient,
+                model: "gemini-3.5-flash",
+                fallbackModel: "gemini-3.5-flash-lite",
+                maxAttemptsPerModel: 3,
+                baseDelayMs: 0
+            });
+
+            assert.strictEqual(attempts, 2, "Must retry and succeed on attempt 2");
+            assert.deepStrictEqual(modelsCalled, ["gemini-3.5-flash", "gemini-3.5-flash"]);
+            assert.strictEqual(result._modelUsed, "gemini-3.5-flash");
+            assert.strictEqual(result.diagnosis, "Recovered on attempt 2");
+        });
+
+        await runAsyncTest("invokeModel exhausts primary model retries and cascades to fallback model successfully", async () => {
+            const modelsCalled = [];
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    modelsCalled.push(model);
+                    if (model === "gemini-3.5-flash") {
+                        const err = new Error("429 RESOURCE_EXHAUSTED: rate limit exceeded");
+                        err.status = 429;
+                        throw err;
+                    }
+                    if (model === "gemini-3.5-flash-lite") {
+                        return { canHeal: true, rootCause: "STALE_LOCATOR", diagnosis: "Healed by fallback model" };
+                    }
+                }
+            };
+
+            const result = await invokeModel({
+                prompt: "test prompt",
+                modelClient: mockClient,
+                model: "gemini-3.5-flash",
+                fallbackModel: "gemini-3.5-flash-lite",
+                maxAttemptsPerModel: 3,
+                baseDelayMs: 0
+            });
+
+            assert.strictEqual(modelsCalled.length, 4, "Must try primary 3 times, then fallback 1 time");
+            assert.strictEqual(modelsCalled.filter((m) => m === "gemini-3.5-flash").length, 3);
+            assert.strictEqual(modelsCalled.filter((m) => m === "gemini-3.5-flash-lite").length, 1);
+            assert.strictEqual(result._modelUsed, "gemini-3.5-flash-lite");
+            assert.strictEqual(result.diagnosis, "Healed by fallback model");
+        });
+
+        await runAsyncTest("invokeModel throws when both primary and fallback models fail with transient errors", async () => {
+            const modelsCalled = [];
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    modelsCalled.push(model);
+                    const err = new Error("503 Service Unavailable");
+                    err.status = 503;
+                    throw err;
+                }
+            };
+
+            let thrownError = null;
+            try {
+                await invokeModel({
+                    prompt: "test prompt",
+                    modelClient: mockClient,
+                    model: "gemini-3.5-flash",
+                    fallbackModel: "gemini-3.5-flash-lite",
+                    maxAttemptsPerModel: 3,
+                    baseDelayMs: 0
+                });
+            } catch (err) {
+                thrownError = err;
+            }
+
+            assert.ok(thrownError, "Should throw error after exhausting both models");
+            assert.strictEqual(modelsCalled.length, 6, "Must try 3 times for primary and 3 times for fallback");
+            assert.strictEqual(modelsCalled.filter((m) => m === "gemini-3.5-flash").length, 3);
+            assert.strictEqual(modelsCalled.filter((m) => m === "gemini-3.5-flash-lite").length, 3);
+            assert.match(thrownError.message, /503 Service Unavailable/);
+        });
+
+        await runAsyncTest("invokeModel aborts immediately on permanent errors without retrying or fallback", async () => {
+            const modelsCalled = [];
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    modelsCalled.push(model);
+                    const err = new Error("401 Unauthorized: Invalid API Key AIzaSyFakeSecret12345");
+                    err.status = 401;
+                    throw err;
+                }
+            };
+
+            let thrownError = null;
+            try {
+                await invokeModel({
+                    prompt: "test prompt",
+                    modelClient: mockClient,
+                    model: "gemini-3.5-flash",
+                    fallbackModel: "gemini-3.5-flash-lite",
+                    apiKey: "AIzaSyFakeSecret12345",
+                    maxAttemptsPerModel: 3,
+                    baseDelayMs: 0
+                });
+            } catch (err) {
+                thrownError = err;
+            }
+
+            assert.ok(thrownError, "Must throw permanent error immediately");
+            assert.strictEqual(modelsCalled.length, 1, "Must NOT retry permanent error or switch to fallback");
+            assert.strictEqual(modelsCalled[0], "gemini-3.5-flash");
+            assert.ok(!thrownError.message.includes("AIzaSyFakeSecret12345"), "API key must be redacted in thrown error");
+            assert.ok(thrownError.message.includes("[REDACTED_API_KEY]"));
+        });
+
+        await runAsyncTest("runRepairAgent records fallback model in summary and result when fallback is used", async () => {
+            const validLocatorPath = path.resolve(TEMP_TEST_DIR, "valid-locator.json");
+            const summaryFilePath = path.resolve(TEMP_TEST_DIR, "fallback-model-summary.json");
+
+            const mockClient = {
+                generateContent: async ({ model }) => {
+                    if (model === "gemini-3.5-flash") {
+                        const err = new Error("503 Model Overloaded");
+                        err.status = 503;
+                        throw err;
+                    }
+                    return {
+                        canHeal: false,
+                        rootCause: "APPLICATION_DEFECT",
+                        diagnosis: "Defect observed by fallback model."
+                    };
+                }
+            };
+
+            const result = await runRepairAgent({
+                contextPath: validLocatorPath,
+                repairDir: TEMP_TEST_DIR,
+                summaryPath: summaryFilePath,
+                modelClient: mockClient,
+                model: "gemini-3.5-flash",
+                fallbackModel: "gemini-3.5-flash-lite",
+                maxAttemptsPerModel: 2,
+                baseDelayMs: 0
+            });
+
+            assert.strictEqual(result.status, "ABSTAINED");
+            assert.strictEqual(result.model, "gemini-3.5-flash-lite", "Result must record actual fallback model used");
+        });
+
         await runAsyncTest("runRepairAgent propagates configured model to summary result and mock client", async () => {
             const validLocatorPath = path.resolve(TEMP_TEST_DIR, "valid-locator.json");
             let capturedModel = null;
@@ -1280,7 +1502,8 @@ async function runAll() {
                 repairDir: TEMP_TEST_DIR,
                 summaryPath: summaryFilePath,
                 modelClient: mockClient,
-                model: customModelName
+                model: customModelName,
+                baseDelayMs: 0
             });
 
             assert.strictEqual(result.status, "ABSTAINED");
