@@ -10,7 +10,7 @@ class ProductListPage {
         this.page = page;
 
         // Centralized Locators (Single Source of Truth)
-        this.heading = page.getByRole("heading", { level: 1, name: "Products - Stale Title Indicator" });
+        this.heading = page.getByRole("heading", { level: 1, name: "Products" });
         this.productCards = page.locator(".product-card");
     }
 
