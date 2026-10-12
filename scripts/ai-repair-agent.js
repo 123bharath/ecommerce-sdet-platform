@@ -300,6 +300,8 @@ function checkPermittedLocatorChanges(addedLines) {
         /^\s*(?:async\s+)?[a-zA-Z0-9_$]+\s*\([^)]*\)\s*\{?\s*$/,
         /^\s*[\{\}\(\)\[\],;]+\s*$/,
         /^\s*\/\//,
+        /^\s*\/\*+/,
+        /^\s*\*+(\/)?/,
         /^\s*$/
     ];
 
@@ -901,8 +903,16 @@ function validatePatchAst(diffString, expectedTargetFile, sourceCommit = null, r
  * Generates a standard unified diff string between original and patched contents.
  */
 function generateUnifiedDiff(relPath, originalContent, patchedContent) {
-    const origLines = originalContent.split(/\r?\n/);
-    const patchedLines = patchedContent.split(/\r?\n/);
+    let origNorm = (originalContent || "").replace(/\r\n/g, "\n");
+    let patchedNorm = (patchedContent || "").replace(/\r\n/g, "\n");
+    if (origNorm.endsWith("\n") && !patchedNorm.endsWith("\n")) {
+        patchedNorm += "\n";
+    } else if (!origNorm.endsWith("\n") && patchedNorm.endsWith("\n")) {
+        origNorm += "\n";
+    }
+
+    const origLines = origNorm.split("\n");
+    const patchedLines = patchedNorm.split("\n");
 
     let start = 0;
     while (start < origLines.length && start < patchedLines.length && origLines[start] === patchedLines[start]) {
@@ -1156,7 +1166,11 @@ ${evidenceSection}
    - Prioritize semantic, user-facing Playwright locators (page.getByRole, page.getByLabel, page.getByText, page.getByTestId) supported by the observed evidence over brittle CSS selectors.
 4. If the root cause is NOT 'STALE_LOCATOR' or cannot be safely healed, set "canHeal": false.
 5. NEVER modify application source code, configuration files, or test assertions.
-6. Return ONLY a valid JSON object matching the schema below.
+6. MINIMAL SURGICAL REPAIR & POM CONFINEMENT:
+   - In "patchedFileContent", return the complete updated target POM code with ONLY the stale locator property or method modified.
+   - Strictly preserve all other code, class methods, comments, JSDoc annotations, formatting, indentation, and file endings exactly as provided in the target POM.
+   - NEVER add extra statements, helper functions, state variables, loops, conditionals, or non-locator logic.
+7. Return ONLY a valid JSON object matching the schema below.
 
 === RESPONSE SCHEMA (JSON ONLY) ===
 {
@@ -1167,7 +1181,7 @@ ${evidenceSection}
   "targetFile": "relative path to target POM (e.g. tests/pages/ProductListPage.js)",
   "originalLocator": "previous selector string",
   "healedLocator": "new resilient accessible selector string",
-  "patchedFileContent": "Full updated code of targetFile with surgical fix applied"
+  "patchedFileContent": "Full updated code of targetFile with minimal surgical locator fix applied, strictly preserving existing comments and methods"
 }
 `;
 }
@@ -1633,7 +1647,7 @@ async function runRepairAgent(options = {}) {
     try {
         validateUnifiedDiff(patchContent, ROOT_DIR, { sourceCommit: options.sourceCommit });
     } catch (err) {
-        console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}`);
+        console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}\n[AI Repair Agent] Rejected patch content:\n${patchContent}`);
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",

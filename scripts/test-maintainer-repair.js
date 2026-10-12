@@ -18,6 +18,7 @@ const {
     checkSyntaxIntegrity,
     checkPermittedLocatorChanges,
     validateAstIntegrity,
+    generateUnifiedDiff,
     runRepairAgent,
     ROOT_DIR
 } = require("./ai-repair-agent");
@@ -1264,6 +1265,40 @@ async function runAll() {
                     "    for (let i = 0; i < 100; i++) { doSomething(); }"
                 ]);
             }, /Security Violation: Unapproved non-locator change in POM/);
+        });
+
+        await runTest("checkPermittedLocatorChanges approves JSDoc and block comments", () => {
+            checkPermittedLocatorChanges([
+                "    /**",
+                "     * @param {string} productName",
+                "     */",
+                "    /* Centralized locator comment */",
+                "    // Single-line comment",
+                "    this.heading = page.getByRole('heading', { name: 'Products' });"
+            ]);
+        });
+
+        await runTest("checkPermittedLocatorChanges strictly rejects arbitrary assignments and calls", () => {
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    this.count = 42;"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
+
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    this.doSomething();"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
+
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    console.log('debug');"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
+        });
+
+        await runTest("generateUnifiedDiff normalizes EOF newlines preventing suffix misalignment", () => {
+            const orig = "line1\nline2\nline3\n";
+            const updated = "line1\nline2-healed\nline3"; // Missing trailing newline
+            const diff = generateUnifiedDiff("tests/pages/ProductListPage.js", orig, updated);
+            assert.ok(diff.includes("@@ -2,1 +2,1 @@"));
+            assert.ok(!diff.includes("-line3"));
+            assert.ok(!diff.includes("+line3"));
         });
 
         await runTest("validatePatchAst enforces single-file target matching", () => {

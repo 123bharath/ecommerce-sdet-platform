@@ -21,6 +21,7 @@ const {
     runRepairAgent,
     resolveEvidence,
     validateEvidenceGrounding,
+    checkPermittedLocatorChanges,
     APPROVED_TARGET_DIR,
     ROOT_DIR
 } = require("./ai-repair-agent");
@@ -350,6 +351,28 @@ async function runAll() {
             assert.ok(diff.includes("+++ b/tests/pages/TestPage.js"));
             assert.ok(diff.includes("-old selector"));
             assert.ok(diff.includes("+new selector"));
+        });
+
+        runTest("generateUnifiedDiff aligns EOF newlines preventing trailing suffix inclusion", () => {
+            const orig = "header\noldLocator\nfooter\n";
+            const updated = "header\nnewLocator\nfooter"; // Missing trailing newline
+            const diff = generateUnifiedDiff("tests/pages/TestPage.js", orig, updated);
+
+            assert.ok(diff.includes("@@ -2,1 +2,1 @@"));
+            assert.ok(diff.includes("-oldLocator"));
+            assert.ok(diff.includes("+newLocator"));
+            assert.ok(!diff.includes("-footer"));
+            assert.ok(!diff.includes("+footer"));
+        });
+
+        runTest("generateUnifiedDiff normalizes CRLF line endings to LF", () => {
+            const orig = "header\r\noldLocator\r\nfooter\r\n";
+            const updated = "header\nnewLocator\nfooter\n";
+            const diff = generateUnifiedDiff("tests/pages/TestPage.js", orig, updated);
+
+            assert.ok(!diff.includes("\r"));
+            assert.ok(diff.includes("-oldLocator"));
+            assert.ok(diff.includes("+newLocator"));
         });
 
         // --------------------------------------------------------------------------
@@ -936,6 +959,31 @@ async function runAll() {
 
             const applied = applyUnifiedDiff(origPom, diff);
             assert.strictEqual(applied.replace(/\r\n/g, "\n").trim(), updatedCode.replace(/\r\n/g, "\n").trim());
+        });
+
+        runTest("Permits standard block comments and JSDoc in locator changes", () => {
+            checkPermittedLocatorChanges([
+                "    /**",
+                "     * @param {string} name",
+                "     */",
+                "    /* block comment */",
+                "    // single line",
+                "    this.heading = page.getByRole('heading', { name: 'Products' });"
+            ]);
+        });
+
+        runTest("Strictly rejects non-locator statement injection in checkPermittedLocatorChanges", () => {
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    this.count = 42;"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
+
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    for (let i = 0; i < 10; i++) {}"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
+
+            assert.throws(() => {
+                checkPermittedLocatorChanges(["    this.validatePage();"]);
+            }, /Security Violation: Unapproved non-locator change in POM/);
         });
 
         // --------------------------------------------------------------------------
