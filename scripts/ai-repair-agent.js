@@ -16,9 +16,14 @@ const GEMINI_MD_PATH = path.resolve(ROOT_DIR, "GEMINI.md");
 // Security whitelist: ONLY Page Object Model files inside tests/pages/ may be targeted
 const APPROVED_TARGET_DIR = path.resolve(ROOT_DIR, "tests/pages");
 
+<<<<<<< HEAD
+// Model configuration: Documented default model is gemini-3.8-flash, configurable via GEMINI_MODEL env var
+const DEFAULT_MODEL = "gemini-3.8-flash";
+=======
 // Model configuration: Primary model defaults to gemini-3.5-flash, fallback to gemini-3.5-flash-lite
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
 /**
  * Validates test-results/healing-context.json.
@@ -147,9 +152,14 @@ function validateTargetFile(targetFileRel, rootDir = ROOT_DIR) {
     const normalized = path.normalize(targetFileRel).replace(/\\/g, "/");
     const resolvedPath = path.resolve(rootDir, normalized);
 
+<<<<<<< HEAD
+    // Verify target resides strictly within APPROVED_TARGET_DIR (tests/pages/)
+    const relativeToPages = path.relative(APPROVED_TARGET_DIR, resolvedPath);
+=======
     // Verify target resides strictly within tests/pages/ under rootDir
     const approvedTargetDir = path.resolve(rootDir, "tests/pages");
     const relativeToPages = path.relative(approvedTargetDir, resolvedPath);
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     if (relativeToPages.startsWith("..") || path.isAbsolute(relativeToPages)) {
         throw new Error(`Security Violation: Changes are strictly restricted to tests/pages/*.js. Rejected: '${targetFileRel}'.`);
     }
@@ -301,8 +311,11 @@ function checkPermittedLocatorChanges(addedLines) {
         /^\s*(?:async\s+)?[a-zA-Z0-9_$]+\s*\([^)]*\)\s*\{?\s*$/,
         /^\s*[\{\}\(\)\[\],;]+\s*$/,
         /^\s*\/\//,
+<<<<<<< HEAD
+=======
         /^\s*\/\*+/,
         /^\s*\*+(\/)?/,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         /^\s*$/
     ];
 
@@ -872,6 +885,8 @@ function validateUnifiedDiff(diffString, rootDir = ROOT_DIR, options = {}) {
         originalContent = fs.readFileSync(resolvedPath, "utf8");
     }
 
+<<<<<<< HEAD
+=======
     // Verify all removed lines exist in originalContent
     const origTrimmedLines = originalContent.split(/\r?\n/).map((l) => l.trim());
     for (const hunk of parsed.hunks) {
@@ -883,6 +898,7 @@ function validateUnifiedDiff(diffString, rootDir = ROOT_DIR, options = {}) {
         }
     }
 
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     const patchedContent = applyUnifiedDiff(originalContent, diffString);
 
     // 4. Validate overall patch integrity, JavaScript syntax, and class structure
@@ -913,6 +929,12 @@ function validatePatchAst(diffString, expectedTargetFile, sourceCommit = null, r
 
 /**
  * Generates a standard unified diff string between original and patched contents.
+<<<<<<< HEAD
+ */
+function generateUnifiedDiff(relPath, originalContent, patchedContent) {
+    const origLines = originalContent.split(/\r?\n/);
+    const patchedLines = patchedContent.split(/\r?\n/);
+=======
  * Includes context lines (default 3) to allow standard patch tools (e.g. git apply)
  * to cleanly anchor hunks.
  */
@@ -932,6 +954,7 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent, options =
     const patchedHasTrailingNewline = patchedNorm.endsWith("\n");
     const patchedRaw = patchedHasTrailingNewline ? patchedNorm.slice(0, -1) : patchedNorm;
     const patchedLines = patchedRaw.length > 0 ? patchedRaw.split("\n") : [];
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     let start = 0;
     while (start < origLines.length && start < patchedLines.length && origLines[start] === patchedLines[start]) {
@@ -945,6 +968,14 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent, options =
         patchedEnd--;
     }
 
+<<<<<<< HEAD
+    const removedLines = origLines.slice(start, origEnd + 1);
+    const addedLines = patchedLines.slice(start, patchedEnd + 1);
+
+    const origCount = removedLines.length;
+    const patchedCount = addedLines.length;
+    const startLineNum = start + 1;
+=======
     if (start > origEnd && start > patchedEnd) {
         return "";
     }
@@ -964,10 +995,21 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent, options =
     const oldHunkCount = leadingContext.length + removedLines.length + trailingContext.length;
     const newHunkStart = leadingContextStart + 1;
     const newHunkCount = leadingContext.length + addedLines.length + trailingContext.length;
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     const diffHeader = [
         `--- a/${relPath}`,
         `+++ b/${relPath}`,
+<<<<<<< HEAD
+        `@@ -${startLineNum},${origCount} +${startLineNum},${patchedCount} @@`
+    ];
+
+    const diffBody = [
+        ...removedLines.map((line) => `-${line}`),
+        ...addedLines.map((line) => `+${line}`)
+    ];
+
+=======
         `@@ -${oldHunkStart},${oldHunkCount} +${newHunkStart},${newHunkCount} @@`
     ];
 
@@ -982,6 +1024,7 @@ function generateUnifiedDiff(relPath, originalContent, patchedContent, options =
         diffBody.push("\\ No newline at end of file");
     }
 
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     return [...diffHeader, ...diffBody, ""].join("\n");
 }
 
@@ -1204,11 +1247,15 @@ ${evidenceSection}
    - Prioritize semantic, user-facing Playwright locators (page.getByRole, page.getByLabel, page.getByText, page.getByTestId) supported by the observed evidence over brittle CSS selectors.
 4. If the root cause is NOT 'STALE_LOCATOR' or cannot be safely healed, set "canHeal": false.
 5. NEVER modify application source code, configuration files, or test assertions.
+<<<<<<< HEAD
+6. Return ONLY a valid JSON object matching the schema below.
+=======
 6. MINIMAL SURGICAL REPAIR & POM CONFINEMENT:
    - In "patchedFileContent", return the complete updated target POM code with ONLY the stale locator property or method modified.
    - Strictly preserve all other code, class methods, comments, JSDoc annotations, formatting, indentation, and file endings exactly as provided in the target POM.
    - NEVER add extra statements, helper functions, state variables, loops, conditionals, or non-locator logic.
 7. Return ONLY a valid JSON object matching the schema below.
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
 === RESPONSE SCHEMA (JSON ONLY) ===
 {
@@ -1219,7 +1266,11 @@ ${evidenceSection}
   "targetFile": "relative path to target POM (e.g. tests/pages/ProductListPage.js)",
   "originalLocator": "previous selector string",
   "healedLocator": "new resilient accessible selector string",
+<<<<<<< HEAD
+  "patchedFileContent": "Full updated code of targetFile with surgical fix applied"
+=======
   "patchedFileContent": "Full updated code of targetFile with minimal surgical locator fix applied, strictly preserving existing comments and methods"
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 }
 `;
 }
@@ -1237,6 +1288,77 @@ function sanitizeJsonResponse(rawText) {
 }
 
 /**
+<<<<<<< HEAD
+ * Invokes Gemini model or test mock to produce repair proposal.
+ * Priority: options.model -> process.env.GEMINI_MODEL -> DEFAULT_MODEL.
+ */
+async function invokeModel({ prompt, apiKey, modelClient, model, timeoutMs = 60000 }) {
+    const selectedModel = model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+
+    if (modelClient) {
+        return await modelClient.generateContent({ prompt, model: selectedModel });
+    }
+
+    const resolvedApiKey = apiKey || process.env.GEMINI_API_KEY;
+    if (!resolvedApiKey) {
+        throw new Error("MISSING_API_KEY: GEMINI_API_KEY environment variable is required.");
+    }
+
+    const { GoogleGenAI } = await import("@google/genai");
+    const ai = new GoogleGenAI({ apiKey: resolvedApiKey });
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            const response = await ai.models.generateContent({
+                model: selectedModel,
+                contents: prompt,
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            canHeal: { type: "BOOLEAN", description: "Whether failure is a stale locator that can be healed" },
+                            rootCause: { type: "STRING", enum: ["STALE_LOCATOR", "APPLICATION_DEFECT", "TEST_DATA_ISSUE", "ENVIRONMENT_ISSUE"] },
+                            diagnosis: { type: "STRING", description: "Explanation grounded in evidence" },
+                            evidenceObserved: { type: "STRING", description: "Observed DOM or accessibility evidence" },
+                            targetFile: { type: "STRING", description: "Exact relative path of POM file, e.g. tests/pages/ProductListPage.js" },
+                            originalLocator: { type: "STRING", description: "Previous selector to replace" },
+                            healedLocator: { type: "STRING", description: "New accessible Playwright locator" },
+                            patchedFileContent: { type: "STRING", description: "Complete updated source code of target POM file" }
+                        },
+                        required: ["canHeal", "rootCause", "diagnosis", "targetFile", "originalLocator", "healedLocator", "patchedFileContent"]
+                    },
+                    temperature: 0.1,
+                    maxOutputTokens: 8192
+                }
+            });
+            clearTimeout(timer);
+
+            const text = response.text || (response.candidates && response.candidates[0]?.content?.parts[0]?.text);
+            if (!text) {
+                throw new Error("EMPTY_MODEL_OUTPUT: Model returned an empty response.");
+            }
+
+            const sanitized = sanitizeJsonResponse(text);
+            return JSON.parse(sanitized);
+        } catch (err) {
+            clearTimeout(timer);
+            lastError = err;
+            const isTransient = /503|UNAVAILABLE|high demand|overloaded/i.test(err.message);
+            if (isTransient && attempt < 3) {
+                const delayMs = attempt * 3000;
+                console.warn(`[AI Repair Agent] Transient model spike (attempt ${attempt}/3). Retrying in ${delayMs / 1000}s...`);
+                await new Promise((r) => setTimeout(r, delayMs));
+                continue;
+            }
+            throw err;
+        }
+    }
+=======
  * Redacts API keys and sensitive tokens from error messages and logs.
  */
 function sanitizeErrorMessage(msg, apiKey = null) {
@@ -1414,6 +1536,7 @@ async function invokeModel({
         }
     }
 
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     throw lastError;
 }
 
@@ -1443,6 +1566,11 @@ async function runRepairAgent(options = {}) {
     const apiKey = options.apiKey || process.env.GEMINI_API_KEY;
     const targetPomRel = options.targetPomRel || "tests/pages/ProductListPage.js";
     const selectedModel = options.model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
+<<<<<<< HEAD
+
+    console.log("=== Antigravity Programmatic AI Repair Agent (Phase 1) ===\n");
+    console.log(`[AI Repair Agent] Configured model: ${selectedModel}`);
+=======
     const fallbackModel = options.fallbackModel !== undefined
         ? options.fallbackModel
         : (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL);
@@ -1452,6 +1580,7 @@ async function runRepairAgent(options = {}) {
     if (fallbackModel && fallbackModel !== selectedModel) {
         console.log(`[AI Repair Agent] Configured fallback model: ${fallbackModel}`);
     }
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 
     const recordSummary = (data) => writeSummary(data, summaryPath, repairDir);
 
@@ -1536,6 +1665,14 @@ async function runRepairAgent(options = {}) {
     let resolvedTargetPomRel = options.targetPomRel || failure.targetFile || null;
     if (!resolvedTargetPomRel && failure.specFile) {
         const specAbs = path.isAbsolute(failure.specFile) ? failure.specFile : path.resolve(ROOT_DIR, failure.specFile);
+<<<<<<< HEAD
+        if (fs.existsSync(specAbs)) {
+            try {
+                const specCode = fs.readFileSync(specAbs, "utf8");
+                const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
+                if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
+            } catch { /* ignore */ }
+=======
         let specCode = null;
         if (fs.existsSync(specAbs)) {
             try {
@@ -1552,6 +1689,7 @@ async function runRepairAgent(options = {}) {
         if (specCode) {
             const match = specCode.match(/(?:require\(|from\s+)["'][^"']*\/pages\/([a-zA-Z0-9_\-]+Page)(?:\.js)?["']/);
             if (match) resolvedTargetPomRel = `tests/pages/${match[1]}.js`;
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         }
     }
     if (!resolvedTargetPomRel) {
@@ -1597,6 +1735,12 @@ async function runRepairAgent(options = {}) {
     console.log(`[AI Repair Agent] Investigating failure: "${failure.testTitle}"...`);
     let modelResponse;
     try {
+<<<<<<< HEAD
+        modelResponse = await invokeModel({ prompt, apiKey, modelClient, model: selectedModel });
+    } catch (err) {
+        console.error(`[AI Repair Agent] Model invocation failed: ${err.message}`);
+        const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: err.message, model: selectedModel };
+=======
         modelResponse = await invokeModel({
             prompt,
             apiKey,
@@ -1611,16 +1755,24 @@ async function runRepairAgent(options = {}) {
         const sanitizedErrMsg = sanitizeErrorMessage(err.message, apiKey);
         console.error(`[AI Repair Agent] Model invocation failed: ${sanitizedErrMsg}`);
         const result = { status: "ERROR", reason: "MODEL_INVOCATION_ERROR", message: sanitizedErrMsg, model: selectedModel };
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         recordSummary(result);
         return result;
     }
 
+<<<<<<< HEAD
+    // 7. Process model response
+    if (!modelResponse || typeof modelResponse !== "object") {
+        console.error("[AI Repair Agent] Model returned malformed response object.");
+        const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT" };
+=======
     const actualModelUsed = modelResponse?._modelUsed || selectedModel;
 
     // 7. Process model response
     if (!modelResponse || typeof modelResponse !== "object") {
         console.error("[AI Repair Agent] Model returned malformed response object.");
         const result = { status: "REJECTED", reason: "MALFORMED_MODEL_OUTPUT", model: actualModelUsed };
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         recordSummary(result);
         return result;
     }
@@ -1630,7 +1782,10 @@ async function runRepairAgent(options = {}) {
         console.log(`[AI Repair Agent] Diagnosis: ${modelResponse.diagnosis}`);
         const result = {
             status: "ABSTAINED",
+<<<<<<< HEAD
+=======
             model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             rootCause: modelResponse.rootCause,
             reason: modelResponse.canHeal ? "NOT_STALE_LOCATOR" : "INSUFFICIENT_EVIDENCE_OR_DEFECT",
             diagnosis: modelResponse.diagnosis,
@@ -1640,6 +1795,8 @@ async function runRepairAgent(options = {}) {
         return result;
     }
 
+<<<<<<< HEAD
+=======
     // Guard against fabricating repairs: If target file already contains the healed locator, abstain
     if (modelResponse.healedLocator && originalPomContent.includes(modelResponse.healedLocator)) {
         console.log(`[AI Repair Agent] Target file already contains proposed locator: '${modelResponse.healedLocator}'. Abstaining.`);
@@ -1655,6 +1812,7 @@ async function runRepairAgent(options = {}) {
         return result;
     }
 
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     // 8. Security verification on proposed patch code
     try {
         if (modelResponse.targetFile) {
@@ -1670,10 +1828,16 @@ async function runRepairAgent(options = {}) {
         }
         if (!modelResponse.patchedFileContent && modelResponse.healedLocator) {
             const staleTarget = modelResponse.originalLocator || failure.targetLocator;
+<<<<<<< HEAD
+            if (staleTarget && originalPomContent.includes(staleTarget)) {
+                modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
+            }
+=======
             if (!staleTarget || !originalPomContent.includes(staleTarget)) {
                 throw new Error(`Security Violation: Stale locator '${staleTarget || "undefined"}' does not exist in target file at source commit.`);
             }
             modelResponse.patchedFileContent = originalPomContent.replace(staleTarget, modelResponse.healedLocator);
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         }
         validateTargetFile(modelResponse.targetFile, ROOT_DIR);
         validatePatchIntegrity(originalPomContent, modelResponse.patchedFileContent);
@@ -1682,7 +1846,10 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
+<<<<<<< HEAD
+=======
             model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1697,7 +1864,10 @@ async function runRepairAgent(options = {}) {
         const result = {
             status: "ABSTAINED",
             reason: "GROUNDING_VIOLATION",
+<<<<<<< HEAD
+=======
             model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: groundingCheck.reason,
             targetFile: modelResponse.targetFile
         };
@@ -1711,11 +1881,18 @@ async function runRepairAgent(options = {}) {
     try {
         validateUnifiedDiff(patchContent, ROOT_DIR, { sourceCommit: options.sourceCommit });
     } catch (err) {
+<<<<<<< HEAD
+        console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}`);
+        const result = {
+            status: "REJECTED",
+            reason: "SECURITY_VIOLATION",
+=======
         console.error(`[AI Repair Agent] Unified diff validation failed: ${err.message}\n[AI Repair Agent] Rejected patch content:\n${patchContent}`);
         const result = {
             status: "REJECTED",
             reason: "SECURITY_VIOLATION",
             model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             message: err.message,
             targetFile: modelResponse.targetFile
         };
@@ -1735,7 +1912,11 @@ async function runRepairAgent(options = {}) {
         const generatedResult = {
             status: "GENERATED",
             canHeal: true,
+<<<<<<< HEAD
+            model: selectedModel,
+=======
             model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
             rootCause: modelResponse.rootCause,
             diagnosis: modelResponse.diagnosis,
             targetFile: modelResponse.targetFile,
@@ -1767,7 +1948,11 @@ async function runRepairAgent(options = {}) {
                 const failureResult = {
                     status: "VALIDATION_FAILED",
                     reason: "TEST_VERIFICATION_FAILED",
+<<<<<<< HEAD
+                    model: selectedModel,
+=======
                     model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                     rootCause: modelResponse.rootCause,
                     diagnosis: modelResponse.diagnosis,
                     targetFile: modelResponse.targetFile,
@@ -1784,7 +1969,11 @@ async function runRepairAgent(options = {}) {
             console.log(`[AI Repair Agent] Isolated candidate verification passed! Repair verified.`);
             const verifiedResult = {
                 status: "VERIFIED",
+<<<<<<< HEAD
+                model: selectedModel,
+=======
                 model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                 rootCause: modelResponse.rootCause,
                 diagnosis: modelResponse.diagnosis,
                 targetFile: modelResponse.targetFile,
@@ -1800,7 +1989,11 @@ async function runRepairAgent(options = {}) {
             const errorResult = {
                 status: "VALIDATION_FAILED",
                 reason: "ISOLATION_ERROR",
+<<<<<<< HEAD
+                model: selectedModel,
+=======
                 model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
                 message: err.message,
                 patchPath: patchPath
             };
@@ -1811,7 +2004,11 @@ async function runRepairAgent(options = {}) {
 
     const summaryResult = {
         status: "PROPOSED",
+<<<<<<< HEAD
+        model: selectedModel,
+=======
         model: actualModelUsed,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         rootCause: modelResponse.rootCause,
         diagnosis: modelResponse.diagnosis,
         targetFile: modelResponse.targetFile,
@@ -2116,6 +2313,8 @@ function writeSummary(data, targetSummaryPath = SUMMARY_PATH, targetRepairDir = 
     }
 }
 
+<<<<<<< HEAD
+=======
 /**
  * Resolves and validates candidate patch artifact layout.
  * Ensures repair.patch exists, is non-empty, and normalizes nested directory layouts if present.
@@ -2170,6 +2369,7 @@ function resolveCandidatePatch(candidateDir) {
     };
 }
 
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
 if (require.main === module) {
     const args = process.argv.slice(2);
     const getArg = (flag) => {
@@ -2181,7 +2381,10 @@ if (require.main === module) {
     const generateOnly = args.includes("--generate-only");
     const isolationMode = args.includes("--worktree") ? "worktree" : "directory";
     const model = getArg("--model");
+<<<<<<< HEAD
+=======
     const fallbackModel = getArg("--fallback-model");
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     const evidencePath = getArg("--evidence");
     const requireEvidence = args.includes("--require-evidence") || Boolean(evidencePath);
     const contextPath = getArg("--context");
@@ -2195,7 +2398,10 @@ if (require.main === module) {
         generateOnly,
         isolationMode,
         model,
+<<<<<<< HEAD
+=======
         fallbackModel,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
         evidencePath,
         requireEvidence,
         sourceCommit,
@@ -2213,10 +2419,13 @@ if (require.main === module) {
 
 module.exports = {
     DEFAULT_MODEL,
+<<<<<<< HEAD
+=======
     DEFAULT_FALLBACK_MODEL,
     resolveCandidatePatch,
     isTransientError,
     sanitizeErrorMessage,
+>>>>>>> 4a6f8429ff0a97fae559904d7f71b35b4bd19bbd
     validateContext,
     classifyPreFilter,
     validateTargetFile,

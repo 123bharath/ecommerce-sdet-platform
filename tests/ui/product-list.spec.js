@@ -1,4 +1,4 @@
-const { test, expect } = require("@playwright/test");
+const { test, expect } = require("../fixtures/base-test");
 const { ProductListPage } = require("../pages/ProductListPage");
 
 test("should display the products page and all product cards", async ({ page }) => {
