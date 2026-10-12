@@ -147,8 +147,9 @@ function validateTargetFile(targetFileRel, rootDir = ROOT_DIR) {
     const normalized = path.normalize(targetFileRel).replace(/\\/g, "/");
     const resolvedPath = path.resolve(rootDir, normalized);
 
-    // Verify target resides strictly within APPROVED_TARGET_DIR (tests/pages/)
-    const relativeToPages = path.relative(APPROVED_TARGET_DIR, resolvedPath);
+    // Verify target resides strictly within tests/pages/ under rootDir
+    const approvedTargetDir = path.resolve(rootDir, "tests/pages");
+    const relativeToPages = path.relative(approvedTargetDir, resolvedPath);
     if (relativeToPages.startsWith("..") || path.isAbsolute(relativeToPages)) {
         throw new Error(`Security Violation: Changes are strictly restricted to tests/pages/*.js. Rejected: '${targetFileRel}'.`);
     }
@@ -877,7 +878,7 @@ function validateUnifiedDiff(diffString, rootDir = ROOT_DIR, options = {}) {
         for (const removedLine of hunk.removedLines) {
             const trimmedRemoved = removedLine.trim();
             if (trimmedRemoved && !origTrimmedLines.includes(trimmedRemoved)) {
-                throw new Error(`Security Violation: Removed line '${trimmedRemoved.slice(0, 50)}' does not exist in target file at source commit.`);
+                throw new Error(`Security Violation: Removed line '${trimmedRemoved}' does not exist in target file at source commit.`);
             }
         }
     }

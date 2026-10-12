@@ -424,6 +424,7 @@ jobs:
             --repair-branch "$REPAIR_BRANCH" \
             --base-branch "$TARGET_BASE" \
             --source-commit "$SOURCE_COMMIT" \
+            --target-file "$TARGET_FILE" \
             --patch validated-patch/repair.patch \
             --summary validated-patch/repair-summary.json
       - name: Generate Publishing Summary

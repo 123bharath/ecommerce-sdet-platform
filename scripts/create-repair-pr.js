@@ -49,7 +49,8 @@ const ALLOWED_GIT_COMMANDS = new Set([
     "push",
     "rev-parse",
     "branch",
-    "status"
+    "status",
+    "apply"
 ]);
 
 const ALLOWED_GH_COMMANDS = new Set([
@@ -121,8 +122,8 @@ function validatePrInputs(inputs = {}, rootDir = ROOT_DIR) {
         throw new Error("Missing required argument: 'sourceCommit'.");
     }
     const sourceCommit = inputs.sourceCommit.trim();
-    if (!/^[0-9a-fA-F]{7,40}$/.test(sourceCommit)) {
-        throw new Error(`Invalid 'sourceCommit': '${sourceCommit}'. Must be a 7 to 40 character hexadecimal git commit SHA.`);
+    if (!/^[0-9a-fA-F]{40}$/.test(sourceCommit)) {
+        throw new Error(`Invalid 'sourceCommit': '${sourceCommit}'. Must be a 40-character hexadecimal git commit SHA.`);
     }
 
     // 5. Validate patchPath
@@ -152,12 +153,25 @@ function validatePrInputs(inputs = {}, rootDir = ROOT_DIR) {
         throw new Error(`Summary path is not a file: '${resolvedSummaryPath}'.`);
     }
 
+    // 7. Optional targetFile validation
+    let targetFile = null;
+    if (inputs.targetFile) {
+        if (typeof inputs.targetFile !== "string" || inputs.targetFile.trim() === "") {
+            throw new Error("Invalid 'targetFile' argument: must be a non-empty string.");
+        }
+        targetFile = inputs.targetFile.trim().replace(/\\/g, "/");
+        if (!targetFile.startsWith("tests/pages/") || !targetFile.endsWith(".js") || targetFile.includes("..")) {
+            throw new Error(`Invalid 'targetFile': '${targetFile}'. Must be a Page Object Model under tests/pages/ ending with .js.`);
+        }
+    }
+
     return {
         baseBranch,
         repairBranch,
         sourceCommit,
         patchPath: resolvedPatchPath,
-        summaryPath: resolvedSummaryPath
+        summaryPath: resolvedSummaryPath,
+        targetFile
     };
 }
 
@@ -190,9 +204,21 @@ function validateCommandSafety(cmd, args = []) {
 
         // Strict guard against deleting user branches
         if (subcommand === "branch") {
-            for (const arg of args) {
-                if (arg === "-D" || arg === "-d" || arg === "--delete") {
+            const hasDelete = args.some(arg => arg === "-D" || arg === "-d" || arg === "--delete");
+            if (hasDelete) {
+                // User branches must NEVER be deleted; only automated rollback cleanup of ai-repair/* branches is allowed
+                const targetRef = args[args.length - 1];
+                if (!targetRef || !targetRef.startsWith("ai-repair/")) {
                     throw new Error(`Security Violation: Deleting branches is strictly prohibited.`);
+                }
+            }
+        }
+
+        // Strict guard on git apply flags
+        if (subcommand === "apply") {
+            for (const arg of args.slice(1)) {
+                if (arg.startsWith("-") && arg !== "--check" && arg !== "--verbose") {
+                    throw new Error(`Security Violation: Unauthorized git apply flag '${arg}'.`);
                 }
             }
         }
@@ -387,7 +413,9 @@ async function createRepairPr(options = {}) {
 
     // 2. Read and validate patch content & security whitelist
     const patchContent = fs.readFileSync(validated.patchPath, "utf8");
-    const patchValidation = validateUnifiedDiff(patchContent, rootDir);
+    const patchValidation = validateUnifiedDiff(patchContent, rootDir, {
+        sourceCommit: validated.sourceCommit
+    });
 
     // 3. Read and validate summary file
     const summaryRaw = fs.readFileSync(validated.summaryPath, "utf8");
@@ -415,6 +443,14 @@ async function createRepairPr(options = {}) {
         };
     }
 
+    if (validated.targetFile && patchValidation.targetFile !== validated.targetFile) {
+        return {
+            success: false,
+            status: "TARGET_MISMATCH",
+            reason: `Target file mismatch: expected '${validated.targetFile}' but patch modifies '${patchValidation.targetFile}'.`
+        };
+    }
+
     // 5. Idempotency Check: check if PR already exists
     const existingPrResult = await checkExistingPr({
         repairBranch: validated.repairBranch,
@@ -438,34 +474,65 @@ async function createRepairPr(options = {}) {
     // 6. Worktree isolation to apply patch and commit without touching working tree
     const worktreeId = `worktree-pr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const worktreeDir = path.resolve(rootDir, "test-results", worktreeId);
+    let worktreeCreated = false;
+    let isSuccess = false;
 
     try {
-        // Create git worktree pointing to sourceCommit with new repair branch
+        // Determine start point from the intended target branch (baseBranch)
+        let baseStartPoint = validated.baseBranch;
+        try {
+            const revRes = await runCommand("git", ["rev-parse", "--verify", validated.baseBranch], {
+                cwd: rootDir,
+                commandRunner: options.commandRunner
+            });
+            if (revRes.exitCode !== 0) {
+                const originRevRes = await runCommand("git", ["rev-parse", "--verify", `origin/${validated.baseBranch}`], {
+                    cwd: rootDir,
+                    commandRunner: options.commandRunner
+                });
+                if (originRevRes.exitCode === 0) {
+                    baseStartPoint = `origin/${validated.baseBranch}`;
+                }
+            }
+        } catch {
+            // fallback to validated.baseBranch
+        }
+
+        // Create git worktree branching from the intended target branch
         const addWorktreeResult = await runCommand("git", [
             "worktree",
             "add",
             "-b",
             validated.repairBranch,
             worktreeDir,
-            validated.sourceCommit
+            baseStartPoint
         ], {
             cwd: rootDir,
             commandRunner: options.commandRunner
         });
 
         if (addWorktreeResult.exitCode !== 0) {
-            throw new Error(`Failed to create git worktree: ${addWorktreeResult.stderr || addWorktreeResult.stdout}`);
+            throw new Error(`Failed to create git worktree from target branch '${validated.baseBranch}': ${addWorktreeResult.stderr || addWorktreeResult.stdout}`);
+        }
+        worktreeCreated = true;
+
+        // Verify that patch is safely compatible with the intended target branch in the worktree
+        const applyCheckResult = await runCommand("git", ["apply", "--check", validated.patchPath], {
+            cwd: worktreeDir,
+            commandRunner: options.commandRunner
+        });
+        if (applyCheckResult.exitCode !== 0) {
+            throw new Error(`Security Violation: Patch cannot be safely applied to target branch '${validated.baseBranch}': ${applyCheckResult.stderr || applyCheckResult.stdout || "git apply --check failed"}`);
         }
 
-        // Ensure worktree target file path exists on disk
-        const worktreeTargetFile = path.resolve(worktreeDir, patchValidation.targetFile);
-        const worktreeTargetDir = path.dirname(worktreeTargetFile);
-        if (!fs.existsSync(worktreeTargetDir)) {
-            fs.mkdirSync(worktreeTargetDir, { recursive: true });
+        // Apply patch directly inside the isolated worktree
+        const applyResult = await runCommand("git", ["apply", validated.patchPath], {
+            cwd: worktreeDir,
+            commandRunner: options.commandRunner
+        });
+        if (applyResult.exitCode !== 0) {
+            throw new Error(`Security Violation: Failed to apply patch to target branch '${validated.baseBranch}': ${applyResult.stderr || applyResult.stdout || "git apply failed"}`);
         }
-
-        // Apply pre-validated patched content strictly inside the worktree
-        fs.writeFileSync(worktreeTargetFile, patchValidation.patchedContent, "utf8");
 
         // Stage target file inside worktree
         const addResult = await runCommand("git", ["add", patchValidation.targetFile], {
@@ -527,6 +594,8 @@ async function createRepairPr(options = {}) {
         const prUrlMatch = (ghPrResult.stdout || "").match(/https:\/\/github\.com\/[^\s]+/);
         const createdPrUrl = prUrlMatch ? prUrlMatch[0] : (ghPrResult.stdout || "").trim();
 
+        isSuccess = true;
+
         return {
             success: true,
             status: "PR_CREATED",
@@ -554,6 +623,18 @@ async function createRepairPr(options = {}) {
                 // Best effort directory removal
             }
         }
+
+        // Clean up the local repair branch if the operation failed after worktree creation
+        if (!isSuccess && worktreeCreated) {
+            try {
+                await runCommand("git", ["branch", "-D", validated.repairBranch], {
+                    cwd: rootDir,
+                    commandRunner: options.commandRunner
+                });
+            } catch {
+                // Best effort branch cleanup on failure
+            }
+        }
     }
 }
 
@@ -567,19 +648,20 @@ if (require.main === module) {
     const repairBranch = getArg("--repair-branch");
     const baseBranch = getArg("--base-branch");
     const sourceCommit = getArg("--source-commit");
+    const targetFile = getArg("--target-file") || getArg("--target-pom");
     const patchPath = getArg("--patch");
     const summaryPath = getArg("--summary");
     const prTitle = getArg("--pr-title");
     const prBody = getArg("--pr-body");
 
     if (!repairBranch || !baseBranch || !sourceCommit || !patchPath || !summaryPath) {
-        console.error("Usage: node scripts/create-repair-pr.js --repair-branch <branch> --base-branch <base> --source-commit <sha> --patch <path> --summary <path>");
+        console.error("Usage: node scripts/create-repair-pr.js --repair-branch <branch> --base-branch <base> --source-commit <sha> --patch <path> --summary <path> [--target-file <path>]");
         process.exit(1);
     }
 
     const draft = !args.includes("--no-draft");
 
-    createRepairPr({ repairBranch, baseBranch, sourceCommit, patchPath, summaryPath, prTitle, prBody, draft })
+    createRepairPr({ repairBranch, baseBranch, sourceCommit, targetFile, patchPath, summaryPath, prTitle, prBody, draft })
         .then((result) => {
             console.log("\n[Create Repair PR Result]:\n", JSON.stringify(result, null, 2));
             if (process.env.GITHUB_OUTPUT) {
